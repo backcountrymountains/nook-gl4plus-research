@@ -21,6 +21,7 @@ Device identifiers:
 | [wifi-and-direct-suspend.md](wifi-and-direct-suspend.md) | WiFi management, Direct Suspend mechanism, synchronization risks |
 | [temperature-management.md](temperature-management.md) | Temperature warning dialogs and thermal shutdown — what triggers them and how to suppress them |
 | [power-management.md](power-management.md) | Deep sleep via `power_enhance_enable`, `PowerManagerEx`, nopowen patch, slide-to-unlock |
+| [ota-updates.md](ota-updates.md) | OTA firmware update mechanism, server URLs, and how to permanently block all update paths |
 
 ---
 
@@ -60,3 +61,8 @@ Kernel and framework behaviour was verified live over ADB with root access (Magi
 - **Slide-to-unlock** is implemented in a custom `PowerManagerService` baked into
   the system image — not controllable via any app or AIDL. Requires root to suppress.
   See [power-management.md](power-management.md).
+
+- **OTA updates** are handled entirely within `com.nook.partner` by `OtaIntentService`
+  (24-hour AlarmManager check) and `SideloadInstaller`. Both can be blocked via
+  `pm disable` plus a `/sdcard/ota_server.conf` redirect to localhost as a fallback.
+  See [ota-updates.md](ota-updates.md).
