@@ -22,6 +22,7 @@ Device identifiers:
 | [temperature-management.md](temperature-management.md) | Temperature warning dialogs and thermal shutdown — what triggers them and how to suppress them |
 | [power-management.md](power-management.md) | Deep sleep via `power_enhance_enable`, `PowerManagerEx`, nopowen patch, slide-to-unlock |
 | [ota-updates.md](ota-updates.md) | OTA firmware update mechanism, server URLs, and how to permanently block all update paths |
+| [eink-and-frontlight.md](eink-and-frontlight.md) | E-ink refresh via `View.invalidate(int)` hook; brightness via `Settings.System`; warmth via `GlowLightService` |
 
 ---
 
@@ -66,3 +67,11 @@ Kernel and framework behaviour was verified live over ADB with root access (Magi
   (24-hour AlarmManager check) and `SideloadInstaller`. Both can be blocked via
   `pm disable` plus a `/sdcard/ota_server.conf` redirect to localhost as a fallback.
   See [ota-updates.md](ota-updates.md).
+
+- **E-ink refresh** uses a hidden B&N-customized AOSP hook: `View.invalidate(int)` routes
+  the integer argument as an EPD waveform command to the display driver. KOReader uses
+  `GC16 | NO_MERGE` for all updates (full-quality only; no partial waveform). **Brightness**
+  is set via `Settings.System.SCREEN_BRIGHTNESS` (0–100 scale); **warmth** is set by
+  sending an intent to `com.nook.partner/.service.GlowLightService`, which holds
+  `DEVICE_POWER` and drives the LM3630A chip — no root required.
+  See [eink-and-frontlight.md](eink-and-frontlight.md).
