@@ -5,7 +5,8 @@ warning dialog and thermal shutdown, and how to suppress the dialog without
 compromising safety.
 
 Sources: decompiled `nookPartner.apk` (`BatteryIcon.java`, `StatusBarService.java`,
-`PowerOffScreenActivity.java`).
+`PowerOffScreenActivity.java`); analysis of `SystemUI.vdex` and `framework-res.apk`
+from the device.
 
 ---
 
@@ -24,6 +25,11 @@ All thresholds are in tenths of a degree Celsius (as reported by the
 ---
 
 ## Where the logic lives
+
+There are **two independent** temperature warning implementations on this device.
+Disabling only the nookPartner one still leaves the SystemUI one active.
+
+### Layer 1 — nookPartner (com.nook.partner)
 
 `com.nook.partner.statusbar.BatteryIcon.checkBatteryTemperature(int temp)`:
 
@@ -47,19 +53,32 @@ private void checkBatteryTemperature(int temp) {
 `BroadcastReceiver` for `ACTION_BATTERY_CHANGED` and calls
 `checkBatteryTemperature()` on every battery update.
 
+### Layer 2 — com.android.systemui (custom Nook code)
+
+The Nook's `SystemUI.apk` contains additional temperature warning logic added
+directly to `com.android.systemui.statusbar.phone.StatusBar` and/or
+`QuickPanelController`. These classes also register for `ACTION_BATTERY_CHANGED`
+(visible in logcat as `D StatusBar: pulgType=` and `D QuickPanelController:
+plugType=` at PID 1992) and can independently show a high-temperature dialog.
+
+Evidence: `SystemUI.vdex` contains the strings `show_temperature_warning`,
+`warning_temperature`, `showHighTemperatureDialog`, `mHighTempDialog`, and
+`PowerNotificationWarnings` — but the device's `framework-res.apk` does **not**
+contain `config_showTemperatureWarning` or `config_warningTemperature`. Standard
+AOSP `PowerUI` is therefore disabled; the dialog comes from the Nook-custom code.
+
+The SystemUI temperature dialog is gated by `Settings.Global.show_temperature_warning`.
+Setting it to `0` suppresses it.
+
 ---
 
 ## Warning dialog
 
-The dialog is a Nook `AlertDialog` containing a single `ImageView` with the
-`ic_batttery_temperature` drawable (battery + thermometer graphic). It has one
-button ("OK") that dismisses it. There is no way to suppress it short of:
+The nookPartner dialog is a Nook `AlertDialog` with the `ic_batttery_temperature`
+drawable and an "OK" dismiss button. The SystemUI dialog uses Android's
+`PowerNotificationWarnings` UI. Both fire around 48°C based on observed behaviour.
 
-- Dismissing it each time (user action), or
-- Disabling `StatusBarService` (see below).
-
-There are no `Settings.System` keys or system properties that gate this dialog.
-The thresholds are hardcoded.
+To suppress both dialogs:
 
 ---
 
@@ -95,9 +114,9 @@ The sleep artwork lives in `/system/media/SleepImageNook/` (Art1–Art6 PNG file
 
 ---
 
-## How to suppress the warning dialog
+## How to suppress the warning dialogs
 
-Disable `StatusBarService` via root:
+### Step 1 — Disable nookPartner StatusBarService (Layer 1)
 
 ```sh
 adb shell su -c 'pm disable com.nook.partner/.statusbar.StatusBarService'
@@ -119,6 +138,20 @@ adb shell su -c 'pm enable com.nook.partner/.statusbar.StatusBarService'
 `com.nook.partner` and is NOT affected by disabling `StatusBarService`. Warmth
 control continues to work after this change.
 
+### Step 2 — Suppress SystemUI temperature warning (Layer 2)
+
+```sh
+adb shell settings put global show_temperature_warning 0
+```
+
+This persists in the Settings database across reboots but is wiped by a factory
+reset. The `no_slideunlock` Magisk module's `service.sh` re-applies it on every
+boot:
+
+```sh
+settings put global show_temperature_warning 0
+```
+
 ---
 
 ## Safety impact of disabling StatusBarService
@@ -128,14 +161,15 @@ The Android framework has its own independent thermal protection that remains ac
 
 | Layer | Status after disabling StatusBarService |
 |-------|-----------------------------------------|
-| nookPartner warning dialog (48°C / 8°C) | **Removed** |
-| nookPartner soft shutdown (50°C / 5°C) | **Removed** |
+| nookPartner warning dialog (48°C / 8°C) | **Removed** (StatusBarService disabled) |
+| nookPartner soft shutdown (50°C / 5°C) | **Removed** (StatusBarService disabled) |
+| SystemUI custom warning dialog | **Removed** (show_temperature_warning=0) |
 | Android framework `BatteryService` thermal shutdown | **Still active** |
 | Kernel thermal governor / hardware OCP | **Still active** |
 
 The device will still shut down safely at extreme temperatures via the framework
-and hardware protection layers. The nookPartner thresholds were a conservative
-early-warning layer on top of those, not the last line of defence.
+and hardware protection layers. The nookPartner and SystemUI thresholds are
+conservative early-warning layers on top of those, not the last line of defence.
 
 ---
 
