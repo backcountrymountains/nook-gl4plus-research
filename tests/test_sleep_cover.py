@@ -18,11 +18,10 @@ from .framework import BaseTest
 log = logging.getLogger(__name__)
 
 COVER_SRC = "/sdcard/koreader/sleep_cover.png"
-TIMESTAMP_FILE = "/data/local/tmp/nook_sleep_cover_ts"
 SLEEP_DIR = "/system/media/SleepImageNook"
 # Verify at least one representative Art file
 ART_FILES = ["Art1_bk.png", "Art3_wt.png", "Art6_wt.png"]
-SETTLE_S = 3.5  # service.sh polls every 1s; nsenter copy adds latency
+SETTLE_S = 2.5  # inotifyd fires immediately on close-write; allow 2.5s for copy
 
 
 def _make_solid_png(width: int, height: int, r: int, g: int, b: int) -> bytes:
@@ -65,13 +64,9 @@ class SleepCoverPropagationTest(BaseTest):
         before = adb.shell_root(f"stat -c %s {SLEEP_DIR}/{ART_FILES[0]}")
         log.info("Art1_bk.png size before: %s bytes", before)
 
-        # Push the file first, THEN remove the timestamp.  This guarantees the
-        # pushed file's mtime is at least as new as the timestamp, avoiding a
-        # race where service.sh touches the timestamp between the two operations.
+        # inotifyd fires on close-write — the push itself triggers the copy.
         log.info("pushing test cover PNG (%d bytes) to %s", self._png_size, COVER_SRC)
         adb.push(self._tmp_path, COVER_SRC)
-        adb.shell_root(f"rm -f {TIMESTAMP_FILE}")
-        log.info("removed timestamp file")
 
         log.info("waiting %.1fs for service.sh to detect mtime change and copy", SETTLE_S)
         time.sleep(SETTLE_S)

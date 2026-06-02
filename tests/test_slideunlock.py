@@ -9,7 +9,7 @@ from .framework import BaseTest
 log = logging.getLogger(__name__)
 
 PROP = "sys.mode.slideUnlock"
-SETTLE_S = 2.5  # service.sh polls every 1s; allow two cycles + margin
+SETTLE_S = 4.0  # service.sh polls every 3s; allow one cycle + margin
 
 
 class SlideUnlockSuppressionTest(BaseTest):
