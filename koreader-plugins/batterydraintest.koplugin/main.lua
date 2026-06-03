@@ -33,12 +33,7 @@ local _ = require("gettext")
 
 local FLUSH_EVERY = 1
 
-local SYSFS = {
-    voltage     = "/sys/class/power_supply/battery/voltage_now",
-    current     = "/sys/class/power_supply/battery/current_now",
-    current_avg = "/sys/class/power_supply/battery/current_avg",
-    charging    = "/sys/class/power_supply/battery/charging",   -- write-only (disable charging)
-}
+local SYSFS_CHARGING = "/sys/class/power_supply/battery/charging"
 
 local BatteryDrainTest = WidgetContainer:extend{
     name        = "batterydraintest",
@@ -59,41 +54,21 @@ local BatteryDrainTest = WidgetContainer:extend{
     log_path   = nil,
     log_buffer = {},
 
-    _saved_screen_timeout = nil,
 }
 
 -- ---------------------------------------------------------------------------
 -- Battery reading
 -- ---------------------------------------------------------------------------
 
-local function sysfs_int(path)
-    local f = io.open(path, "r")
-    if not f then return nil end
-    local v = f:read("*n")
-    f:close()
-    return v
-end
-
 function BatteryDrainTest:_battery()
-    -- Capacity and charging via Android API: guaranteed non-blocking, no root.
-    -- os.execute("su -c cat ...") blocks indefinitely when the CPU is in
-    -- deep sleep (power_enhance_enable=1), which KRP sets 1s after page turns.
+    -- Android API only: non-blocking, no root, safe during KRP deep sleep.
+    -- Sysfs reads for voltage/current involve I2C to the fuel gauge chip,
+    -- which is powered down during power_enhance_enable=1 deep sleep.
+    -- io.open() on those nodes blocks indefinitely — do not use them here.
     local android = require("android")
-    local cap = android.getBatteryLevel()
-    local chg = android.isCharging()
-
-    -- Direct sysfs for voltage/current: no root, no blocking. SELinux may
-    -- deny these from the KOReader app context — returns nil if so.
-    local uv     = sysfs_int(SYSFS.voltage)
-    local ua     = sysfs_int(SYSFS.current)
-    local ua_avg = sysfs_int(SYSFS.current_avg)
-
     return {
-        capacity       = cap,
-        voltage_mv     = uv     and math.floor(uv     / 1000) or nil,
-        current_ma     = ua     and math.floor(ua     / 1000) or nil,
-        current_avg_ma = ua_avg and math.floor(ua_avg / 1000) or nil,
-        charging       = chg,
+        capacity = android.getBatteryLevel(),
+        charging = android.isCharging(),
     }
 end
 
@@ -128,7 +103,7 @@ end
 -- ---------------------------------------------------------------------------
 
 function BatteryDrainTest:_disableCharging()
-    os.execute("su -c 'echo 0 > " .. SYSFS.charging .. "'")
+    os.execute("su -c 'echo 0 > " .. SYSFS_CHARGING .. "'")
     logger.info("BatteryDrainTest: charging disabled")
 end
 
@@ -178,25 +153,21 @@ function BatteryDrainTest:_doPageTurn()
         logger.dbg("BatteryDrainTest: skipping page turn, top widget=" .. tostring(top.name))
     end
 
-    -- TSV: cycle, time, capacity%, voltage_mv, current_ma, current_avg_ma,
-    --      sleeps_this_cycle, total_sleep_s_this_cycle
+    -- TSV: cycle, time, capacity%, charging, sleeps_this_cycle, total_sleep_s
     local row = string.format(
-        "%d\t%s\t%s\t%s\t%s\t%s\t%d\t%d",
+        "%d\t%s\t%s\t%s\t%d\t%d",
         self.cycle, ts,
-        b.capacity       ~= nil and tostring(b.capacity)       or "?",
-        b.voltage_mv     ~= nil and tostring(b.voltage_mv)     or "?",
-        b.current_ma     ~= nil and tostring(b.current_ma)     or "?",
-        b.current_avg_ma ~= nil and tostring(b.current_avg_ma) or "?",
+        b.capacity ~= nil and tostring(b.capacity) or "?",
+        tostring(b.charging),
         self.sleep_count,
         math.floor(self.total_sleep_s)
     )
     self:_log(row)
 
     logger.info(string.format(
-        "BatteryDrainTest: cycle %d  %s%%  %smV  avg=%smA  sleeps=%d  sleep_s=%d",
+        "BatteryDrainTest: cycle %d  %s%%  charging=%s  sleeps=%d  sleep_s=%d",
         self.cycle,
-        tostring(b.capacity), tostring(b.voltage_mv),
-        tostring(b.current_avg_ma),
+        tostring(b.capacity), tostring(b.charging),
         self.sleep_count, math.floor(self.total_sleep_s)
     ))
 
@@ -219,31 +190,17 @@ function BatteryDrainTest:_start()
     self:_disableWifi()
     self:_disableCharging()
 
-    -- Set screen timeout to 90s so the screen turns off between page turns.
-    -- This triggers Android's onSuspend/onResume cycle, which is the only
-    -- reliable way to reschedule after KRP deep sleep (FLAG_KEEP_SCREEN_ON
-    -- prevents screen-off entirely, so onSuspend never fires and the plugin
-    -- stalls after the first page turn).
-    -- Device is awake here (user just tapped Start), so su is safe to call.
-    os.execute("su -c 'settings get system screen_off_timeout > /data/local/tmp/.bdt_sto 2>/dev/null'")
-    local sf = io.open("/data/local/tmp/.bdt_sto", "r")
-    self._saved_screen_timeout = "2147483647"
-    if sf then
-        local v = sf:read("*l")
-        sf:close()
-        os.remove("/data/local/tmp/.bdt_sto")
-        if v and v:match("^%d+$") then self._saved_screen_timeout = v end
-    end
-    os.execute("su -c 'settings put system screen_off_timeout 90000'")
-    logger.info("BatteryDrainTest: screen_off_timeout set to 90s (was " .. self._saved_screen_timeout .. ")")
+    -- Keep screen on so the e-ink image stays visible between page turns.
+    local android = require("android")
+    android.timeout.set(-1)
 
     local b = self:_battery()
     self:_log(string.format(
-        "# Battery Drain Test  started=%s  interval=%ds  capacity=%s%%  voltage=%smV",
+        "# Battery Drain Test  started=%s  interval=%ds  capacity=%s%%",
         os.date("%Y-%m-%d %H:%M:%S"), self.interval_s,
-        tostring(b.capacity), tostring(b.voltage_mv)
+        tostring(b.capacity)
     ))
-    self:_log("cycle\ttime\tcapacity%\tvoltage_mv\tcurrent_ma\tcurrent_avg_ma\tsleeps\tsleep_s")
+    self:_log("cycle\ttime\tcapacity%\tcharging\tsleeps\tsleep_s")
     self:_flush()
 
     self.last_page_time = os.time()
@@ -262,11 +219,8 @@ function BatteryDrainTest:_stop()
         self.cycle, tostring(b.capacity), os.date("%Y-%m-%d %H:%M:%S")
     ))
     self:_flush()
-    if self._saved_screen_timeout then
-        os.execute("su -c 'settings put system screen_off_timeout " .. self._saved_screen_timeout .. "'")
-        logger.info("BatteryDrainTest: screen_off_timeout restored to " .. self._saved_screen_timeout)
-        self._saved_screen_timeout = nil
-    end
+    local android = require("android")
+    android.timeout.set(0)
     logger.info("BatteryDrainTest: stopped at cycle " .. self.cycle)
 end
 
