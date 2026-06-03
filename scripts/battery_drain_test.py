@@ -37,9 +37,10 @@ STOP_AT_PERCENT = 5         # stop test when battery reaches this level
 LOG_FILE = "claude_battery_drain.log"
 
 CHARGING_NODE = "/sys/class/power_supply/battery/charging"
-CAPACITY_NODE = "/sys/class/power_supply/battery/capacity"
-VOLTAGE_NODE  = "/sys/class/power_supply/battery/voltage_now"
-CURRENT_NODE  = "/sys/class/power_supply/battery/current_now"
+CAPACITY_NODE     = "/sys/class/power_supply/battery/capacity"
+VOLTAGE_NODE      = "/sys/class/power_supply/battery/voltage_now"
+CURRENT_NODE      = "/sys/class/power_supply/battery/current_now"
+CURRENT_AVG_NODE  = "/sys/class/power_supply/battery/current_avg"
 
 # ---------------------------------------------------------------------------
 # Logging — all detail goes to file; only cycle summaries reach stdout
@@ -84,13 +85,15 @@ def read_battery() -> dict[str, int | None]:
     capacity = read_int(CAPACITY_NODE)
     voltage_uv = read_int(VOLTAGE_NODE)
     current_ua = read_int(CURRENT_NODE)
+    current_avg_ua = read_int(CURRENT_AVG_NODE)
     charging_raw = adb_shell(f"cat {CHARGING_NODE}")
 
     return {
-        "capacity":   capacity,
-        "voltage_mv": voltage_uv // 1000 if voltage_uv is not None else None,
-        "current_ma": current_ua // 1000 if current_ua is not None else None,
-        "charging":   charging_raw == "1",
+        "capacity":       capacity,
+        "voltage_mv":     voltage_uv // 1000 if voltage_uv is not None else None,
+        "current_ma":     current_ua // 1000 if current_ua is not None else None,
+        "current_avg_ma": current_avg_ua // 1000 if current_avg_ua is not None else None,
+        "charging":       charging_raw == "1",
     }
 
 
@@ -260,8 +263,8 @@ def main() -> None:
 
     log.info("confirmed discharging at %s%%", batt["capacity"])
     print(f"Discharging confirmed at {batt['capacity']}%. Starting page turn loop.")
-    print(f"{'Cycle':>6}  {'Time':>8}  {'Battery':>7}  {'Voltage':>8}  {'Current':>9}  Sleep?")
-    print("-" * 60)
+    print(f"{'Cycle':>6}  {'Time':>8}  {'Battery':>7}  {'Voltage':>8}  {'Inst':>7}  {'Avg':>7}  Sleep?")
+    print("-" * 67)
 
     cycle = 0
     while True:
@@ -279,16 +282,18 @@ def main() -> None:
         time.sleep(2)   # brief pause before battery read
 
         batt = read_battery()
-        log.info("cycle %d: %s%%  %smV  %smA  deep_sleep=%s",
-                 cycle, batt["capacity"], batt["voltage_mv"], batt["current_ma"], deep_sleep)
+        log.info("cycle %d: %s%%  %smV  inst=%smA  avg=%smA  deep_sleep=%s",
+                 cycle, batt["capacity"], batt["voltage_mv"],
+                 batt["current_ma"], batt["current_avg_ma"], deep_sleep)
 
-        ts  = datetime.now().strftime("%H:%M:%S")
-        cap = f"{batt['capacity']}%" if batt["capacity"] is not None else "?%"
-        mv  = f"{batt['voltage_mv']}mV" if batt["voltage_mv"] is not None else "?mV"
-        ma  = f"{batt['current_ma']}mA" if batt["current_ma"] is not None else "?mA"
-        slp = "YES" if deep_sleep else "NO "
+        ts   = datetime.now().strftime("%H:%M:%S")
+        cap  = f"{batt['capacity']}%" if batt["capacity"] is not None else "?%"
+        mv   = f"{batt['voltage_mv']}mV" if batt["voltage_mv"] is not None else "?mV"
+        ma   = f"{batt['current_ma']}mA" if batt["current_ma"] is not None else "?mA"
+        mavg = f"{batt['current_avg_ma']}mA" if batt["current_avg_ma"] is not None else "?mA"
+        slp  = "YES" if deep_sleep else "NO "
 
-        print(f"{cycle:>6}  {ts:>8}  {cap:>7}  {mv:>8}  {ma:>9}  {slp}")
+        print(f"{cycle:>6}  {ts:>8}  {cap:>7}  {mv:>8}  {ma:>7}  {mavg:>7}  {slp}")
 
         if batt["capacity"] is not None and batt["capacity"] <= STOP_AT_PERCENT:
             log.warning("battery at %d%% — stopping test", batt["capacity"])
