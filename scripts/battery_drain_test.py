@@ -136,7 +136,9 @@ def open_book() -> None:
 
 
 def page_turn() -> None:
-    adb_shell("input keyevent 25")   # KEYCODE_VOLUME_DOWN → LPgFwd
+    # Device may be in deep sleep (power_enhance_enable=1); allow extra time
+    # for the ADB command to wake the CPU before the keyevent is processed.
+    adb_shell("input keyevent 25", timeout=30)   # KEYCODE_VOLUME_DOWN → LPgFwd
 
 
 # ---------------------------------------------------------------------------
