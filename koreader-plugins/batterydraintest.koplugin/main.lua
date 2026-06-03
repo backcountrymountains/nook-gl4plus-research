@@ -65,11 +65,12 @@ local BatteryDrainTest = WidgetContainer:extend{
 -- Sysfs
 -- ---------------------------------------------------------------------------
 
-local TMP = "/sdcard/koreader/.bdt_tmp"
+-- /data/local/tmp is world-writable; /sdcard is FUSE and may reject root writes.
+local TMP = "/data/local/tmp/.bdt_tmp"
 
 local function read_int(path)
     -- SELinux blocks direct io.open on sysfs from the KOReader app process.
-    -- Write via su to a sdcard tmp file, then read it back normally.
+    -- Write via su to a world-writable tmp file, then read it back normally.
     os.execute("su -c 'cat " .. path .. " > " .. TMP .. " 2>/dev/null'")
     local f = io.open(TMP, "r")
     if not f then return nil end
@@ -160,6 +161,12 @@ function BatteryDrainTest:_doPageTurn()
     self.cycle = self.cycle + 1
     self.last_page_time = os.time()
 
+    -- Read battery BEFORE the page turn. KRP sets power_enhance_enable=1
+    -- ~1 second after a page turn; os.execute("su -c cat") blocks indefinitely
+    -- if launched while the CPU is in deep sleep.
+    local b  = self:_battery()
+    local ts = os.date("%H:%M:%S")
+
     -- Only turn the page if the reader is the topmost widget
     -- (guards against dialogs being open)
     local top = UIManager:getTopmostVisibleWidget() or {}
@@ -168,9 +175,6 @@ function BatteryDrainTest:_doPageTurn()
     else
         logger.dbg("BatteryDrainTest: skipping page turn, top widget=" .. tostring(top.name))
     end
-
-    local b  = self:_battery()
-    local ts = os.date("%H:%M:%S")
 
     -- TSV: cycle, time, capacity%, voltage_mv, current_ma, current_avg_ma,
     --      sleeps_this_cycle, total_sleep_s_this_cycle
