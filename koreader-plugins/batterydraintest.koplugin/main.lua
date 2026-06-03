@@ -17,6 +17,11 @@ Key design decisions:
   - On resume, _schedule() re-evaluates elapsed wall-clock time and turns
     the page immediately if the interval has passed, or reschedules for
     the remaining time if not.
+  - RTC wakeup alarm: _setRtcAlarm() writes to /sys/class/rtc/rtc0/wakealarm
+    via root so the device wakes from KRP deep sleep at exactly the right time.
+    This is the primary mechanism for autonomous unplugged operation.
+    The UIManager timer (scheduleIn) is retained as a fallback for when USB
+    is connected (KRP deep sleep doesn't actually suspend the CPU then).
   - Log is buffered and flushed every FLUSH_EVERY cycles.
 
 Log location: <koreader data dir>/battery_drain_test.log  (TSV)
@@ -34,6 +39,7 @@ local _ = require("gettext")
 local FLUSH_EVERY = 1
 
 local SYSFS_CHARGING = "/sys/class/power_supply/battery/charging"
+local RTC_WAKEALARM  = "/sys/class/rtc/rtc0/wakealarm"
 
 local BatteryDrainTest = WidgetContainer:extend{
     name        = "batterydraintest",
@@ -70,6 +76,27 @@ function BatteryDrainTest:_battery()
         capacity = android.getBatteryLevel(),
         charging = android.isCharging(),
     }
+end
+
+-- ---------------------------------------------------------------------------
+-- RTC wakeup alarm
+-- ---------------------------------------------------------------------------
+
+function BatteryDrainTest:_setRtcAlarm()
+    -- Write the target wake time to the RTC alarm register so the device
+    -- will autonomously wake from KRP deep sleep (mem suspend) after interval_s.
+    -- Requires root. The write must complete before KRP enters deep sleep
+    -- (which it does ~1s after a page turn), so call this BEFORE GotoViewRel.
+    local alarm_ts = os.time() + self.interval_s
+    -- Clear existing alarm, then set new one. Both need root.
+    os.execute("su -c 'echo 0 > " .. RTC_WAKEALARM .. "'")
+    os.execute("su -c 'echo " .. tostring(alarm_ts) .. " > " .. RTC_WAKEALARM .. "'")
+    logger.dbg("BatteryDrainTest: RTC alarm → " .. os.date("%H:%M:%S", alarm_ts))
+end
+
+function BatteryDrainTest:_clearRtcAlarm()
+    os.execute("su -c 'echo 0 > " .. RTC_WAKEALARM .. "'")
+    logger.dbg("BatteryDrainTest: RTC alarm cleared")
 end
 
 -- ---------------------------------------------------------------------------
@@ -144,6 +171,11 @@ function BatteryDrainTest:_doPageTurn()
     local b  = self:_battery()
     local ts = os.date("%H:%M:%S")
 
+    -- Set RTC alarm before the page turn so it completes before KRP sleeps.
+    -- KRP intercepts GotoViewRel and sets deep sleep for 1s after; the su
+    -- command here runs while the CPU is still awake.
+    self:_setRtcAlarm()
+
     -- Only turn the page if the reader is the topmost widget
     -- (guards against dialogs being open)
     local top = UIManager:getTopmostVisibleWidget() or {}
@@ -204,6 +236,8 @@ function BatteryDrainTest:_start()
     self:_flush()
 
     self.last_page_time = os.time()
+    -- Set initial RTC alarm so first page turn wakes device if it deep sleeps.
+    self:_setRtcAlarm()
     UIManager:scheduleIn(self.interval_s, self.task)
     logger.info("BatteryDrainTest: started — log=" .. self.log_path)
 end
@@ -212,6 +246,7 @@ function BatteryDrainTest:_stop()
     if not self.running then return end
     self.running = false
     UIManager:unschedule(self.task)
+    self:_clearRtcAlarm()
 
     local b = self:_battery()
     self:_log(string.format(
@@ -243,6 +278,15 @@ function BatteryDrainTest:onResume()
         self.total_sleep_s = self.total_sleep_s + slept
         self.suspend_wall_time = nil
         logger.dbg("BatteryDrainTest: resumed after " .. slept .. "s")
+    end
+    -- Re-arm RTC alarm for remaining time. AlarmManager may have overwritten
+    -- our alarm while we slept; doing this on every resume fights that race.
+    local remaining = self.interval_s - (os.time() - self.last_page_time)
+    if remaining > 5 then
+        local alarm_ts = os.time() + remaining
+        os.execute("su -c 'echo 0 > " .. RTC_WAKEALARM .. "'")
+        os.execute("su -c 'echo " .. tostring(alarm_ts) .. " > " .. RTC_WAKEALARM .. "'")
+        logger.dbg("BatteryDrainTest: onResume re-armed RTC → " .. os.date("%H:%M:%S", alarm_ts))
     end
     self:_schedule()
 end
