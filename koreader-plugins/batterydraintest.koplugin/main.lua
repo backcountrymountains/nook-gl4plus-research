@@ -59,6 +59,8 @@ local BatteryDrainTest = WidgetContainer:extend{
 
     log_path   = nil,
     log_buffer = {},
+
+    _saved_screen_timeout = nil,
 }
 
 -- ---------------------------------------------------------------------------
@@ -207,6 +209,20 @@ function BatteryDrainTest:_start()
     self:_disableWifi()
     self:_disableCharging()
 
+    -- Keep screen on between page turns so sleep cover doesn't appear.
+    -- Read current value so we can restore it on stop.
+    local f = io.popen("settings get system screen_off_timeout")
+    if f then
+        local v = f:read("*l")
+        f:close()
+        if v and v:match("^%d+$") then
+            self._saved_screen_timeout = v
+        end
+    end
+    local new_timeout_ms = (self.interval_s + 30) * 1000
+    os.execute("settings put system screen_off_timeout " .. tostring(new_timeout_ms))
+    logger.info("BatteryDrainTest: screen_off_timeout set to " .. new_timeout_ms .. "ms (was " .. tostring(self._saved_screen_timeout) .. ")")
+
     local b = self:_battery()
     self:_log(string.format(
         "# Battery Drain Test  started=%s  interval=%ds  capacity=%s%%  voltage=%smV",
@@ -232,6 +248,11 @@ function BatteryDrainTest:_stop()
         self.cycle, tostring(b.capacity), os.date("%Y-%m-%d %H:%M:%S")
     ))
     self:_flush()
+    if self._saved_screen_timeout then
+        os.execute("settings put system screen_off_timeout " .. self._saved_screen_timeout)
+        logger.info("BatteryDrainTest: screen_off_timeout restored to " .. self._saved_screen_timeout .. "ms")
+        self._saved_screen_timeout = nil
+    end
     logger.info("BatteryDrainTest: stopped at cycle " .. self.cycle)
 end
 
