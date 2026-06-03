@@ -68,7 +68,9 @@ local BatteryDrainTest = WidgetContainer:extend{
 -- ---------------------------------------------------------------------------
 
 local function read_int(path)
-    local f = io.open(path, "r")
+    -- io.open on sysfs is blocked by SELinux for the KOReader app process;
+    -- su -c cat sidesteps the restriction.
+    local f = io.popen("su -c 'cat " .. path .. "'")
     if not f then return nil end
     local v = f:read("*n")
     f:close()
