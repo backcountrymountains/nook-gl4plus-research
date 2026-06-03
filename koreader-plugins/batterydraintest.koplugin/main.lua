@@ -38,7 +38,6 @@ local _ = require("gettext")
 
 local FLUSH_EVERY = 1
 
-local SYSFS_CHARGING     = "/sys/class/power_supply/battery/charging"
 local SYSFS_VOLTAGE      = "/sys/class/power_supply/battery/voltage_now"
 local SYSFS_CURRENT      = "/sys/class/power_supply/battery/current_now"
 local SYSFS_CURRENT_AVG  = "/sys/class/power_supply/battery/current_avg"
@@ -62,6 +61,10 @@ local BatteryDrainTest = WidgetContainer:extend{
 
     log_path   = nil,
     log_buffer = {},
+
+    -- unplug-wait state (non-nil only while waiting for USB removal)
+    _unplug_cancelled = false,
+    _unplug_msg       = nil,
 
 }
 
@@ -155,11 +158,6 @@ end
 -- Device control
 -- ---------------------------------------------------------------------------
 
-function BatteryDrainTest:_disableCharging()
-    os.execute("su -c 'echo 0 > " .. SYSFS_CHARGING .. "'")
-    logger.info("BatteryDrainTest: charging disabled")
-end
-
 function BatteryDrainTest:_disableWifi()
     local NetworkMgr = require("ui/network/manager")
     if NetworkMgr:isWifiOn() then
@@ -241,6 +239,54 @@ end
 
 function BatteryDrainTest:_start()
     if self.running then return end
+    local android = require("android")
+    if android.isCharging() then
+        self:_showUnplugWait()
+    else
+        self:_beginTest()
+    end
+end
+
+function BatteryDrainTest:_showUnplugWait()
+    -- Cancel any previous pending wait.
+    self._unplug_cancelled = true
+    if self._unplug_msg then
+        UIManager:close(self._unplug_msg)
+        self._unplug_msg = nil
+    end
+    self._unplug_cancelled = false
+
+    local InfoMessage = require("ui/widget/infomessage")
+    local msg = InfoMessage:new{
+        text = _("Battery Drain Test\n\nUnplug USB to begin. The test will start automatically when USB is removed."),
+        dismiss_callback = function()
+            -- User tapped to dismiss — treat as cancel.
+            self._unplug_cancelled = true
+            self._unplug_msg = nil
+        end,
+    }
+    UIManager:show(msg)
+    self._unplug_msg = msg
+
+    local android = require("android")
+    local function check()
+        if self._unplug_cancelled then return end
+        if not android.isCharging() then
+            -- USB removed: close dialog and start.
+            if self._unplug_msg then
+                UIManager:close(self._unplug_msg)
+                self._unplug_msg = nil
+            end
+            self:_beginTest()
+        else
+            UIManager:scheduleIn(1, check)
+        end
+    end
+    UIManager:scheduleIn(1, check)
+end
+
+function BatteryDrainTest:_beginTest()
+    if self.running then return end
     self.running       = true
     self.cycle         = 0
     self.sleep_count   = 0
@@ -248,7 +294,6 @@ function BatteryDrainTest:_start()
     self.log_buffer    = {}
 
     self:_disableWifi()
-    self:_disableCharging()
 
     -- Keep screen on so the e-ink image stays visible between page turns.
     local android = require("android")
@@ -264,13 +309,19 @@ function BatteryDrainTest:_start()
     self:_flush()
 
     self.last_page_time = os.time()
-    -- Set initial RTC alarm so first page turn wakes device if it deep sleeps.
     self:_setRtcAlarm()
     UIManager:scheduleIn(self.interval_s, self.task)
     logger.info("BatteryDrainTest: started — log=" .. self.log_path)
 end
 
 function BatteryDrainTest:_stop()
+    -- Cancel any pending unplug-wait.
+    self._unplug_cancelled = true
+    if self._unplug_msg then
+        UIManager:close(self._unplug_msg)
+        self._unplug_msg = nil
+    end
+
     if not self.running then return end
     self.running = false
     UIManager:unschedule(self.task)
@@ -367,7 +418,7 @@ function BatteryDrainTest:init()
 end
 
 function BatteryDrainTest:onCloseWidget()
-    self:_stop()
+    self:_stop()   -- also cancels any pending unplug-wait
     UIManager:unschedule(self.poller)
     self.task   = nil
     self.poller = nil
