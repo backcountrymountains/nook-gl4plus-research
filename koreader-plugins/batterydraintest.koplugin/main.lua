@@ -320,19 +320,48 @@ function BatteryDrainTest:onResume()
 end
 
 -- ---------------------------------------------------------------------------
+-- ADB flag-file control
+-- ---------------------------------------------------------------------------
+-- Create /sdcard/koreader/bdt_start (or bdt_stop) from ADB to trigger
+-- start/stop without touching the device. Polled every 3s via UIManager.
+
+function BatteryDrainTest:_pollFlags()
+    if not self.poller then return end   -- widget closed
+
+    local function check(name, action)
+        local path = DataStorage:getDataDir() .. "/" .. name
+        local f = io.open(path, "r")
+        if f then
+            f:close()
+            os.remove(path)
+            action()
+        end
+    end
+
+    check("bdt_start", function() self:_start() end)
+    check("bdt_stop",  function() self:_stop()  end)
+
+    UIManager:scheduleIn(3, self.poller)
+end
+
+-- ---------------------------------------------------------------------------
 -- KOReader lifecycle
 -- ---------------------------------------------------------------------------
 
 function BatteryDrainTest:init()
     self.log_path = DataStorage:getDataDir() .. "/battery_drain_test.log"
-    self.task = function() self:_schedule() end
+    self.task   = function() self:_schedule()   end
+    self.poller = function() self:_pollFlags()  end
     self.ui.menu:registerToMainMenu(self)
+    UIManager:scheduleIn(3, self.poller)
     logger.info("BatteryDrainTest: init, log=" .. self.log_path)
 end
 
 function BatteryDrainTest:onCloseWidget()
     self:_stop()
-    self.task = nil
+    UIManager:unschedule(self.poller)
+    self.task   = nil
+    self.poller = nil
 end
 
 function BatteryDrainTest:onCloseDocument()
