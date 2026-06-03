@@ -31,7 +31,7 @@ local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local logger = require("logger")
 local _ = require("gettext")
 
-local FLUSH_EVERY = 5
+local FLUSH_EVERY = 1
 
 local SYSFS = {
     voltage     = "/sys/class/power_supply/battery/voltage_now",
@@ -58,6 +58,8 @@ local BatteryDrainTest = WidgetContainer:extend{
 
     log_path   = nil,
     log_buffer = {},
+
+    _saved_screen_timeout = nil,
 }
 
 -- ---------------------------------------------------------------------------
@@ -217,11 +219,23 @@ function BatteryDrainTest:_start()
     self:_disableWifi()
     self:_disableCharging()
 
-    -- Keep screen on between page turns so the sleep cover doesn't appear.
-    -- android.timeout.set(-1) sets FLAG_KEEP_SCREEN_ON — no root needed, proper API.
-    local android = require("android")
-    android.timeout.set(-1)
-    logger.info("BatteryDrainTest: FLAG_KEEP_SCREEN_ON set")
+    -- Set screen timeout to 90s so the screen turns off between page turns.
+    -- This triggers Android's onSuspend/onResume cycle, which is the only
+    -- reliable way to reschedule after KRP deep sleep (FLAG_KEEP_SCREEN_ON
+    -- prevents screen-off entirely, so onSuspend never fires and the plugin
+    -- stalls after the first page turn).
+    -- Device is awake here (user just tapped Start), so su is safe to call.
+    os.execute("su -c 'settings get system screen_off_timeout > /data/local/tmp/.bdt_sto 2>/dev/null'")
+    local sf = io.open("/data/local/tmp/.bdt_sto", "r")
+    self._saved_screen_timeout = "2147483647"
+    if sf then
+        local v = sf:read("*l")
+        sf:close()
+        os.remove("/data/local/tmp/.bdt_sto")
+        if v and v:match("^%d+$") then self._saved_screen_timeout = v end
+    end
+    os.execute("su -c 'settings put system screen_off_timeout 90000'")
+    logger.info("BatteryDrainTest: screen_off_timeout set to 90s (was " .. self._saved_screen_timeout .. ")")
 
     local b = self:_battery()
     self:_log(string.format(
@@ -248,9 +262,11 @@ function BatteryDrainTest:_stop()
         self.cycle, tostring(b.capacity), os.date("%Y-%m-%d %H:%M:%S")
     ))
     self:_flush()
-    local android = require("android")
-    android.timeout.set(0)
-    logger.info("BatteryDrainTest: FLAG_KEEP_SCREEN_ON cleared")
+    if self._saved_screen_timeout then
+        os.execute("su -c 'settings put system screen_off_timeout " .. self._saved_screen_timeout .. "'")
+        logger.info("BatteryDrainTest: screen_off_timeout restored to " .. self._saved_screen_timeout)
+        self._saved_screen_timeout = nil
+    end
     logger.info("BatteryDrainTest: stopped at cycle " .. self.cycle)
 end
 
