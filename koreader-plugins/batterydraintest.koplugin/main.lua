@@ -38,8 +38,11 @@ local _ = require("gettext")
 
 local FLUSH_EVERY = 1
 
-local SYSFS_CHARGING = "/sys/class/power_supply/battery/charging"
-local RTC_WAKEALARM  = "/sys/class/rtc/rtc0/wakealarm"
+local SYSFS_CHARGING     = "/sys/class/power_supply/battery/charging"
+local SYSFS_VOLTAGE      = "/sys/class/power_supply/battery/voltage_now"
+local SYSFS_CURRENT      = "/sys/class/power_supply/battery/current_now"
+local SYSFS_CURRENT_AVG  = "/sys/class/power_supply/battery/current_avg"
+local RTC_WAKEALARM      = "/sys/class/rtc/rtc0/wakealarm"
 
 local BatteryDrainTest = WidgetContainer:extend{
     name        = "batterydraintest",
@@ -67,15 +70,38 @@ local BatteryDrainTest = WidgetContainer:extend{
 -- ---------------------------------------------------------------------------
 
 function BatteryDrainTest:_battery()
-    -- Android API only: non-blocking, no root, safe during KRP deep sleep.
-    -- Sysfs reads for voltage/current involve I2C to the fuel gauge chip,
-    -- which is powered down during power_enhance_enable=1 deep sleep.
-    -- io.open() on those nodes blocks indefinitely — do not use them here.
+    -- Capacity and charging: Android broadcast cache — non-blocking, no root,
+    -- safe at any time including during KRP deep sleep.
     local android = require("android")
-    return {
-        capacity = android.getBatteryLevel(),
-        charging = android.isCharging(),
+    local b = {
+        capacity      = android.getBatteryLevel(),
+        charging      = android.isCharging(),
+        voltage_mv    = nil,
+        current_ma    = nil,
+        current_avg_ma = nil,
     }
+
+    -- Fuel gauge sysfs (voltage, current, avg current): requires root and
+    -- I2C bus availability. Safe ONLY when called before GotoViewRel — the
+    -- device is awake at that point. KRP powers down I2C ~1s after the turn.
+    -- One su invocation reads all three to minimise process-spawn overhead.
+    local f = io.popen(
+        "su -c 'cat " .. SYSFS_VOLTAGE .. " "
+                      .. SYSFS_CURRENT .. " "
+                      .. SYSFS_CURRENT_AVG .. " 2>/dev/null'"
+    )
+    if f then
+        local v_raw   = tonumber(f:read("*l"))
+        local i_raw   = tonumber(f:read("*l"))
+        local ia_raw  = tonumber(f:read("*l"))
+        f:close()
+        -- sysfs reports microvolts / microamps; convert to mV / mA
+        b.voltage_mv    = v_raw  and math.floor(v_raw  / 1000) or nil
+        b.current_ma    = i_raw  and math.floor(i_raw  / 1000) or nil
+        b.current_avg_ma = ia_raw and math.floor(ia_raw / 1000) or nil
+    end
+
+    return b
 end
 
 -- ---------------------------------------------------------------------------
@@ -185,11 +211,12 @@ function BatteryDrainTest:_doPageTurn()
         logger.dbg("BatteryDrainTest: skipping page turn, top widget=" .. tostring(top.name))
     end
 
-    -- TSV: cycle, time, capacity%, charging, sleeps_this_cycle, total_sleep_s
+    -- TSV: cycle, time, capacity%, voltage_mv, current_ma, current_avg_ma, charging, sleeps, sleep_s
+    local function fmt(v) return v ~= nil and tostring(v) or "?" end
     local row = string.format(
-        "%d\t%s\t%s\t%s\t%d\t%d",
+        "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d",
         self.cycle, ts,
-        b.capacity ~= nil and tostring(b.capacity) or "?",
+        fmt(b.capacity), fmt(b.voltage_mv), fmt(b.current_ma), fmt(b.current_avg_ma),
         tostring(b.charging),
         self.sleep_count,
         math.floor(self.total_sleep_s)
@@ -197,9 +224,10 @@ function BatteryDrainTest:_doPageTurn()
     self:_log(row)
 
     logger.info(string.format(
-        "BatteryDrainTest: cycle %d  %s%%  charging=%s  sleeps=%d  sleep_s=%d",
+        "BatteryDrainTest: cycle %d  %s%%  %smV  %smA (avg %smA)  charging=%s  sleeps=%d  sleep_s=%d",
         self.cycle,
-        tostring(b.capacity), tostring(b.charging),
+        fmt(b.capacity), fmt(b.voltage_mv), fmt(b.current_ma), fmt(b.current_avg_ma),
+        tostring(b.charging),
         self.sleep_count, math.floor(self.total_sleep_s)
     ))
 
@@ -232,7 +260,7 @@ function BatteryDrainTest:_start()
         os.date("%Y-%m-%d %H:%M:%S"), self.interval_s,
         tostring(b.capacity)
     ))
-    self:_log("cycle\ttime\tcapacity%\tcharging\tsleeps\tsleep_s")
+    self:_log("cycle\ttime\tcapacity%\tvoltage_mv\tcurrent_ma\tcurrent_avg_ma\tcharging\tsleeps\tsleep_s")
     self:_flush()
 
     self.last_page_time = os.time()
