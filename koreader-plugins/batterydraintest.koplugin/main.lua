@@ -59,8 +59,6 @@ local BatteryDrainTest = WidgetContainer:extend{
 
     log_path   = nil,
     log_buffer = {},
-
-    _saved_screen_timeout = nil,
 }
 
 -- ---------------------------------------------------------------------------
@@ -215,21 +213,11 @@ function BatteryDrainTest:_start()
     self:_disableWifi()
     self:_disableCharging()
 
-    -- Keep screen on between page turns so sleep cover doesn't appear.
-    -- Read current value so we can restore it on stop.
-    os.execute("settings get system screen_off_timeout > " .. TMP .. " 2>/dev/null")
-    local sf = io.open(TMP, "r")
-    if sf then
-        local v = sf:read("*l")
-        sf:close()
-        os.remove(TMP)
-        if v and v:match("^%d+$") then
-            self._saved_screen_timeout = v
-        end
-    end
-    local new_timeout_ms = (self.interval_s + 30) * 1000
-    os.execute("su -c 'settings put system screen_off_timeout " .. tostring(new_timeout_ms) .. "'")
-    logger.info("BatteryDrainTest: screen_off_timeout set to " .. new_timeout_ms .. "ms (was " .. tostring(self._saved_screen_timeout) .. ")")
+    -- Keep screen on between page turns so the sleep cover doesn't appear.
+    -- android.timeout.set(-1) sets FLAG_KEEP_SCREEN_ON — no root needed, proper API.
+    local android = require("android")
+    android.timeout.set(-1)
+    logger.info("BatteryDrainTest: FLAG_KEEP_SCREEN_ON set")
 
     local b = self:_battery()
     self:_log(string.format(
@@ -256,11 +244,9 @@ function BatteryDrainTest:_stop()
         self.cycle, tostring(b.capacity), os.date("%Y-%m-%d %H:%M:%S")
     ))
     self:_flush()
-    if self._saved_screen_timeout then
-        os.execute("su -c 'settings put system screen_off_timeout " .. self._saved_screen_timeout .. "'")
-        logger.info("BatteryDrainTest: screen_off_timeout restored to " .. self._saved_screen_timeout .. "ms")
-        self._saved_screen_timeout = nil
-    end
+    local android = require("android")
+    android.timeout.set(0)
+    logger.info("BatteryDrainTest: FLAG_KEEP_SCREEN_ON cleared")
     logger.info("BatteryDrainTest: stopped at cycle " .. self.cycle)
 end
 
