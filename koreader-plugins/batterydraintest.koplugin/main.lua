@@ -67,13 +67,17 @@ local BatteryDrainTest = WidgetContainer:extend{
 -- Sysfs
 -- ---------------------------------------------------------------------------
 
+local TMP = "/sdcard/koreader/.bdt_tmp"
+
 local function read_int(path)
-    -- io.open on sysfs is blocked by SELinux for the KOReader app process;
-    -- su -c cat sidesteps the restriction.
-    local f = io.popen("su -c 'cat " .. path .. "'")
+    -- SELinux blocks direct io.open on sysfs from the KOReader app process.
+    -- Write via su to a sdcard tmp file, then read it back normally.
+    os.execute("su -c 'cat " .. path .. " > " .. TMP .. " 2>/dev/null'")
+    local f = io.open(TMP, "r")
     if not f then return nil end
     local v = f:read("*n")
     f:close()
+    os.remove(TMP)
     return v
 end
 
@@ -213,16 +217,18 @@ function BatteryDrainTest:_start()
 
     -- Keep screen on between page turns so sleep cover doesn't appear.
     -- Read current value so we can restore it on stop.
-    local f = io.popen("settings get system screen_off_timeout")
-    if f then
-        local v = f:read("*l")
-        f:close()
+    os.execute("settings get system screen_off_timeout > " .. TMP .. " 2>/dev/null")
+    local sf = io.open(TMP, "r")
+    if sf then
+        local v = sf:read("*l")
+        sf:close()
+        os.remove(TMP)
         if v and v:match("^%d+$") then
             self._saved_screen_timeout = v
         end
     end
     local new_timeout_ms = (self.interval_s + 30) * 1000
-    os.execute("settings put system screen_off_timeout " .. tostring(new_timeout_ms))
+    os.execute("su -c 'settings put system screen_off_timeout " .. tostring(new_timeout_ms) .. "'")
     logger.info("BatteryDrainTest: screen_off_timeout set to " .. new_timeout_ms .. "ms (was " .. tostring(self._saved_screen_timeout) .. ")")
 
     local b = self:_battery()
@@ -251,7 +257,7 @@ function BatteryDrainTest:_stop()
     ))
     self:_flush()
     if self._saved_screen_timeout then
-        os.execute("settings put system screen_off_timeout " .. self._saved_screen_timeout)
+        os.execute("su -c 'settings put system screen_off_timeout " .. self._saved_screen_timeout .. "'")
         logger.info("BatteryDrainTest: screen_off_timeout restored to " .. self._saved_screen_timeout .. "ms")
         self._saved_screen_timeout = nil
     end
