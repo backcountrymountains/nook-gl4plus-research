@@ -34,11 +34,10 @@ local _ = require("gettext")
 local FLUSH_EVERY = 5
 
 local SYSFS = {
-    capacity    = "/sys/class/power_supply/battery/capacity",
     voltage     = "/sys/class/power_supply/battery/voltage_now",
     current     = "/sys/class/power_supply/battery/current_now",
     current_avg = "/sys/class/power_supply/battery/current_avg",
-    charging    = "/sys/class/power_supply/battery/charging",
+    charging    = "/sys/class/power_supply/battery/charging",   -- write-only (disable charging)
 }
 
 local BatteryDrainTest = WidgetContainer:extend{
@@ -62,36 +61,37 @@ local BatteryDrainTest = WidgetContainer:extend{
 }
 
 -- ---------------------------------------------------------------------------
--- Sysfs
+-- Battery reading
 -- ---------------------------------------------------------------------------
 
--- /data/local/tmp is world-writable; /sdcard is FUSE and may reject root writes.
-local TMP = "/data/local/tmp/.bdt_tmp"
-
-local function read_int(path)
-    -- SELinux blocks direct io.open on sysfs from the KOReader app process.
-    -- Write via su to a world-writable tmp file, then read it back normally.
-    os.execute("su -c 'cat " .. path .. " > " .. TMP .. " 2>/dev/null'")
-    local f = io.open(TMP, "r")
+local function sysfs_int(path)
+    local f = io.open(path, "r")
     if not f then return nil end
     local v = f:read("*n")
     f:close()
-    os.remove(TMP)
     return v
 end
 
 function BatteryDrainTest:_battery()
-    local cap    = read_int(SYSFS.capacity)
-    local uv     = read_int(SYSFS.voltage)
-    local ua     = read_int(SYSFS.current)
-    local ua_avg = read_int(SYSFS.current_avg)
-    local chg    = read_int(SYSFS.charging)
+    -- Capacity and charging via Android API: guaranteed non-blocking, no root.
+    -- os.execute("su -c cat ...") blocks indefinitely when the CPU is in
+    -- deep sleep (power_enhance_enable=1), which KRP sets 1s after page turns.
+    local android = require("android")
+    local cap = android.getBatteryLevel()
+    local chg = android.isCharging()
+
+    -- Direct sysfs for voltage/current: no root, no blocking. SELinux may
+    -- deny these from the KOReader app context — returns nil if so.
+    local uv     = sysfs_int(SYSFS.voltage)
+    local ua     = sysfs_int(SYSFS.current)
+    local ua_avg = sysfs_int(SYSFS.current_avg)
+
     return {
         capacity       = cap,
-        voltage_mv     = uv    and math.floor(uv    / 1000) or nil,
-        current_ma     = ua    and math.floor(ua    / 1000) or nil,
+        voltage_mv     = uv     and math.floor(uv     / 1000) or nil,
+        current_ma     = ua     and math.floor(ua     / 1000) or nil,
         current_avg_ma = ua_avg and math.floor(ua_avg / 1000) or nil,
-        charging       = chg == 1,
+        charging       = chg,
     }
 end
 
