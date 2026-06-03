@@ -328,6 +328,15 @@ end
 function BatteryDrainTest:_pollFlags()
     if not self.poller then return end   -- widget closed
 
+    -- When the test is running on battery (USB disconnected), ADB can't reach
+    -- us anyway — skip the filesystem work to keep the awake window clean.
+    -- Still poll when test is stopped so a bdt_start dropped via USB is noticed.
+    local android = require("android")
+    if self.running and not android.isCharging() then
+        UIManager:scheduleIn(3, self.poller)
+        return
+    end
+
     local function check(name, action)
         local path = DataStorage:getDataDir() .. "/" .. name
         local f = io.open(path, "r")
