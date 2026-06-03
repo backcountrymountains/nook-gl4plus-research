@@ -43,6 +43,11 @@ local SYSFS_CURRENT      = "/sys/class/power_supply/battery/current_now"
 local SYSFS_CURRENT_AVG  = "/sys/class/power_supply/battery/current_avg"
 local RTC_WAKEALARM      = "/sys/class/rtc/rtc0/wakealarm"
 
+-- io.popen("su -c ...") does not capture output in KOReader's NativeActivity.
+-- Pattern that works: os.execute() writes to a tmp file; io.open() reads it back.
+local TMP_USB      = "/data/local/tmp/bdt_usb"
+local TMP_READINGS = "/data/local/tmp/bdt_readings"
+
 local BatteryDrainTest = WidgetContainer:extend{
     name        = "batterydraintest",
     is_doc_only = true,
@@ -84,15 +89,14 @@ function BatteryDrainTest:_battery()
         current_avg_ma = nil,
     }
 
-    -- Fuel gauge sysfs (voltage, current, avg current): requires root and
-    -- I2C bus availability. Safe ONLY when called before GotoViewRel — the
-    -- device is awake at that point. KRP powers down I2C ~1s after the turn.
-    -- One su invocation reads all three to minimise process-spawn overhead.
-    local f = io.popen(
+    -- Fuel gauge sysfs: requires root; safe only before GotoViewRel (CPU awake).
+    -- KRP powers down I2C ~1s after a page turn.
+    os.execute(
         "su -c 'cat " .. SYSFS_VOLTAGE .. " "
                       .. SYSFS_CURRENT .. " "
-                      .. SYSFS_CURRENT_AVG .. " 2>/dev/null'"
+                      .. SYSFS_CURRENT_AVG .. " > " .. TMP_READINGS .. " 2>/dev/null'"
     )
+    local f = io.open(TMP_READINGS, "r")
     if f then
         local v_raw   = tonumber(f:read("*l"))
         local i_raw   = tonumber(f:read("*l"))
@@ -152,6 +156,22 @@ function BatteryDrainTest:_flush()
     else
         logger.warn("BatteryDrainTest: cannot open " .. self.log_path)
     end
+end
+
+-- ---------------------------------------------------------------------------
+-- USB detection
+-- ---------------------------------------------------------------------------
+
+local function isUsbConnected()
+    -- android.isCharging() returns false when FULL (status=5); io.popen doesn't
+    -- capture output in KOReader's NativeActivity. Use os.execute() to write
+    -- usb/online to a tmp file (root required; Magisk must grant org.koreader.launcher).
+    os.execute("su -c 'cat /sys/class/power_supply/usb/online > " .. TMP_USB .. " 2>/dev/null'")
+    local f = io.open(TMP_USB, "r")
+    if not f then return false end
+    local v = f:read("*l")
+    f:close()
+    return v == "1"
 end
 
 -- ---------------------------------------------------------------------------
@@ -239,8 +259,7 @@ end
 
 function BatteryDrainTest:_start()
     if self.running then return end
-    local android = require("android")
-    if android.isCharging() then
+    if isUsbConnected() then
         self:_showUnplugWait()
     else
         self:_beginTest()
@@ -271,7 +290,7 @@ function BatteryDrainTest:_showUnplugWait()
     local android = require("android")
     local function check()
         if self._unplug_cancelled then return end
-        if not android.isCharging() then
+        if not isUsbConnected() then
             -- USB removed: close dialog and start.
             if self._unplug_msg then
                 UIManager:close(self._unplug_msg)
@@ -279,10 +298,10 @@ function BatteryDrainTest:_showUnplugWait()
             end
             self:_beginTest()
         else
-            UIManager:scheduleIn(1, check)
+            UIManager:scheduleIn(3, check)
         end
     end
-    UIManager:scheduleIn(1, check)
+    UIManager:scheduleIn(3, check)
 end
 
 function BatteryDrainTest:_beginTest()
@@ -382,8 +401,7 @@ function BatteryDrainTest:_pollFlags()
     -- When the test is running on battery (USB disconnected), ADB can't reach
     -- us anyway — skip the filesystem work to keep the awake window clean.
     -- Still poll when test is stopped so a bdt_start dropped via USB is noticed.
-    local android = require("android")
-    if self.running and not android.isCharging() then
+    if self.running and not isUsbConnected() then
         UIManager:scheduleIn(3, self.poller)
         return
     end
