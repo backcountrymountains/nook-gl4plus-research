@@ -48,6 +48,7 @@ CURRENT_AVG_NODE  = "/sys/class/power_supply/battery/current_avg"
 
 logging.basicConfig(
     filename=LOG_FILE,
+    filemode="a",
     level=logging.DEBUG,
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
