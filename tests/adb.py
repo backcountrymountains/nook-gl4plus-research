@@ -49,6 +49,14 @@ def push(local_path: str, remote_path: str, timeout: int = 30) -> None:
     log.debug("pushed %s -> %s", local_path, remote_path)
 
 
+def pull(remote_path: str, local_path: str, timeout: int = 30) -> None:
+    """Pull a file from the device to a local path. Raises AdbError on failure."""
+    result = _run([*_BASE, "pull", remote_path, local_path], timeout=timeout)
+    if result.returncode != 0:
+        raise AdbError(f"pull failed: {result.stderr.strip()}")
+    log.debug("pulled %s -> %s", remote_path, local_path)
+
+
 def logcat_since(timestamp: str, timeout: int = 10) -> str:
     """Return logcat lines since a given timestamp (MM-DD HH:MM:SS.mmm)."""
     result = _run(

@@ -123,8 +123,14 @@ function BatteryDrainTest:_setRtcAlarm()
     local alarm_ts = os.time() + self.interval_s
     -- Clear existing alarm, then set new one. Both need root.
     os.execute("su -c 'echo 0 > " .. RTC_WAKEALARM .. "'")
-    os.execute("su -c 'echo " .. tostring(alarm_ts) .. " > " .. RTC_WAKEALARM .. "'")
-    logger.dbg("BatteryDrainTest: RTC alarm → " .. os.date("%H:%M:%S", alarm_ts))
+    os.execute("su -c 'echo " .. tostring(alarm_ts) .. " > " .. RTC_WAKEALARM
+        .. " && cat " .. RTC_WAKEALARM .. " > " .. TMP_READINGS .. "'")
+    local f = io.open(TMP_READINGS, "r")
+    local readback = f and f:read("*l") or "nil"
+    if f then f:close() end
+    logger.info("BatteryDrainTest: RTC alarm set=" .. tostring(alarm_ts)
+        .. " readback=" .. readback
+        .. " target=" .. os.date("%H:%M:%S", alarm_ts))
 end
 
 function BatteryDrainTest:_clearRtcAlarm()
@@ -365,7 +371,7 @@ function BatteryDrainTest:onSuspend()
     if not self.running then return end
     self.suspend_wall_time = os.time()
     UIManager:unschedule(self.task)
-    logger.dbg("BatteryDrainTest: suspended")
+    logger.info("BatteryDrainTest: onSuspend wall=" .. tostring(self.suspend_wall_time))
 end
 
 function BatteryDrainTest:onResume()
@@ -375,7 +381,9 @@ function BatteryDrainTest:onResume()
         self.sleep_count   = self.sleep_count + 1
         self.total_sleep_s = self.total_sleep_s + slept
         self.suspend_wall_time = nil
-        logger.dbg("BatteryDrainTest: resumed after " .. slept .. "s")
+        logger.info("BatteryDrainTest: onResume slept=" .. slept .. "s")
+    else
+        logger.info("BatteryDrainTest: onResume (no suspend_wall_time)")
     end
     -- Re-arm RTC alarm for remaining time. AlarmManager may have overwritten
     -- our alarm while we slept; doing this on every resume fights that race.
@@ -398,10 +406,9 @@ end
 function BatteryDrainTest:_pollFlags()
     if not self.poller then return end   -- widget closed
 
-    -- When the test is running on battery (USB disconnected), ADB can't reach
-    -- us anyway — skip the filesystem work to keep the awake window clean.
-    -- Still poll when test is stopped so a bdt_start dropped via USB is noticed.
-    if self.running and not isUsbConnected() then
+    -- When the test is running, ADB can't reach us (USB is out), and
+    -- isUsbConnected() spawns a su process every poll — skip entirely.
+    if self.running then
         UIManager:scheduleIn(3, self.poller)
         return
     end
