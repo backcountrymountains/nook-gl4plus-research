@@ -1,11 +1,9 @@
 #!/system/bin/sh
-# Called by inotifyd: $1=events $2=watched_dir $3=filename
-# Copies the KOReader sleep cover to all Nook Art slots.
-
-[ "$3" = "sleep_cover.png" ] || exit 0
+# Copies /sdcard/koreader/sleep_cover.png to all Nook Art slots.
+# Called by cover_watcher.sh on mtime change, or manually.
 
 SLEEP_DIR=/system/media/SleepImageNook
-COVER_SRC="$2/$3"
+COVER_SRC=/sdcard/koreader/sleep_cover.png
 
 mount -o remount,rw /system
 for art in Art1_bk.png Art1_wt.png Art2_bk.png Art2_wt.png \
