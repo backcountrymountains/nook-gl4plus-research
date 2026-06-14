@@ -26,6 +26,26 @@ Device identifiers:
 
 ---
 
+## Environment
+
+**ADB setup — Windows USB bridge to WSL**
+
+The Nook is connected to a Windows host via USB. WSL2 cannot access USB devices
+directly, so ADB is bridged: the Windows ADB server connects to the device over USB
+and WSL connects to that server over TCP.
+
+All ADB commands from WSL use:
+```
+adb -H 192.168.1.92 -P 5037 <command>
+```
+
+**Consequence:** unplugging USB from the Nook also breaks ADB connectivity — there
+is no WiFi ADB fallback. Any test that requires USB to be unplugged must complete all
+ADB setup *before* the unplug, write output to the device filesystem (`/sdcard/` or
+`/data/local/tmp/`), and pull results after USB is reconnected.
+
+---
+
 ## Research methodology
 
 All app-layer findings are derived from APKs decompiled with jadx from the factory
