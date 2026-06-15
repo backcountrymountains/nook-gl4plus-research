@@ -319,7 +319,7 @@ function BatteryDrainTest:_beginTest()
     self.log_buffer    = {}
 
     -- Set log path at test-start time so the date reflects the actual run date.
-    self.log_path = DataStorage:getDataDir() .. "/bdt_" .. os.date("%Y-%m-%d") .. ".log"
+    self.log_path = DataStorage:getDataDir() .. "/battery_drain_test_" .. os.date("%Y-%m-%d") .. ".log"
 
     self:_disableWifi()
 
@@ -438,7 +438,7 @@ end
 
 function BatteryDrainTest:init()
     -- Placeholder shown in the menu before the first run; _beginTest() sets the real path.
-    self.log_path = DataStorage:getDataDir() .. "/bdt_" .. os.date("%Y-%m-%d") .. ".log"
+    self.log_path = DataStorage:getDataDir() .. "/battery_drain_test_" .. os.date("%Y-%m-%d") .. ".log"
     self.task   = function() self:_schedule()   end
     self.poller = function() self:_pollFlags()  end
     self.ui.menu:registerToMainMenu(self)
