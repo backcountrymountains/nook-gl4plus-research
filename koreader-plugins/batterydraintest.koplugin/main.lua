@@ -318,6 +318,9 @@ function BatteryDrainTest:_beginTest()
     self.total_sleep_s = 0
     self.log_buffer    = {}
 
+    -- Set log path at test-start time so the date reflects the actual run date.
+    self.log_path = DataStorage:getDataDir() .. "/bdt_" .. os.date("%Y-%m-%d") .. ".log"
+
     self:_disableWifi()
 
     -- Keep screen on so the e-ink image stays visible between page turns.
@@ -434,7 +437,8 @@ end
 -- ---------------------------------------------------------------------------
 
 function BatteryDrainTest:init()
-    self.log_path = DataStorage:getDataDir() .. "/battery_drain_test.log"
+    -- Placeholder shown in the menu before the first run; _beginTest() sets the real path.
+    self.log_path = DataStorage:getDataDir() .. "/bdt_" .. os.date("%Y-%m-%d") .. ".log"
     self.task   = function() self:_schedule()   end
     self.poller = function() self:_pollFlags()  end
     self.ui.menu:registerToMainMenu(self)
