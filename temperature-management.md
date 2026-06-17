@@ -39,6 +39,36 @@ These match the nookPartner thresholds exactly. `BatteryService` runs
 independently of `StatusBarService`, so this shutdown remains active even when
 `StatusBarService` is disabled.
 
+#### Live shutdown test (2026-06-17)
+
+Verified by walking the spoofed battery temperature from 49.5°C to past 50°C in
+0.1°C steps (3 seconds per step) using `dumpsys battery set temp` while monitoring
+logcat. `dumpsys battery set temp` is in-memory only and clears automatically on
+reboot — no persistent state is written.
+
+| Step | Temp | Observed behaviour |
+|------|------|--------------------|
+| 1–5  | 49.5°C – 49.9°C | BatteryService logged temp each cycle; compared against 500; no action |
+| 6    | **50.0°C** | `ShutdownThread` acquired `ShutdownThread-cpu` and `ShutdownThread-screen` wakelocks immediately |
+| 7    | 50.1°C | Package manager shutdown; NFC/BT/Radio shutdown; StorageManager shutdown — clean orderly sequence |
+| 8    | 50.2°C | ADB lost — device offline |
+
+Shutdown fired **immediately and precisely at 50°C** (raw value 500), with no
+hysteresis or delay. The shutdown sequence was clean (identical to a normal
+power-off) and the device booted normally after a manual power button press.
+
+Logcat at the moment of trigger:
+```
+I/BatteryService: -->>> mBatteryProps.batteryTemperature .....500
+D/PowerManagerService: wakeLock: 'ShutdownThread-cpu' ACQ
+D/PowerManagerService: wakeLock: 'ShutdownThread-screen' ACQ
+I/ShutdownThread: -=-=-=- wait for sleepscreen finish draw -=-=-=-=
+I/ShutdownThread: Shutting down package manager...
+I/ShutdownThread: Waiting for NFC, Bluetooth and Radio...
+I/ShutdownThread: NFC, Radio and Bluetooth shutdown complete.
+I/ShutdownThread: Shutting down StorageManagerService
+```
+
 ### CPU/GPU die temperature (kernel — confirmed via sysfs)
 
 Read from `/sys/class/thermal/thermal_zone*/trip_point_*_{type,temp}` on device.
