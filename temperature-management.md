@@ -145,7 +145,7 @@ adb shell settings put global show_temperature_warning 0
 ```
 
 This persists in the Settings database across reboots but is wiped by a factory
-reset. The `no_slideunlock` Magisk module's `service.sh` re-applies it on every
+reset. The `sleep_cover` Magisk module's `service.sh` re-applies it on every
 boot:
 
 ```sh
@@ -164,12 +164,18 @@ The Android framework has its own independent thermal protection that remains ac
 | nookPartner warning dialog (48°C / 8°C) | **Removed** (StatusBarService disabled) |
 | nookPartner soft shutdown (50°C / 5°C) | **Removed** (StatusBarService disabled) |
 | SystemUI custom warning dialog | **Removed** (show_temperature_warning=0) |
-| Android framework `BatteryService` thermal shutdown | **Still active** |
-| Kernel thermal governor / hardware OCP | **Still active** |
+| Android `BatteryService` shutdown (50°C / 5°C) | **Still active** (confirmed via logcat) |
+| Kernel CPU/GPU throttle (65°C–105°C passive) | **Still active** (confirmed via sysfs) |
+| Kernel CPU/GPU hard shutdown (110°C critical) | **Still active** (confirmed via sysfs) |
 
-The device will still shut down safely at extreme temperatures via the framework
-and hardware protection layers. The nookPartner and SystemUI thresholds are
-conservative early-warning layers on top of those, not the last line of defence.
+The Android `BatteryService` on this device logs `mShutdownBatteryHighTemperature =
+500` and `mShutdownBatteryLowTemperature = 50` (tenths of a degree — 50°C and 5°C)
+on every battery update cycle, confirmed from a live device logcat. The
+`BatteryService` shutdown threshold exactly matches the nookPartner threshold, so
+the 50°C shutdown protection remains active after `StatusBarService` is disabled.
+
+The net effect of this tweak is removal of the **48°C warning dialog only**.
+The 50°C shutdown and all hardware-level protections remain in place.
 
 ---
 
