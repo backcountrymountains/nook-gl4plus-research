@@ -6,11 +6,13 @@ compromising safety.
 
 Sources: decompiled `nookPartner.apk` (`BatteryIcon.java`, `StatusBarService.java`,
 `PowerOffScreenActivity.java`); analysis of `SystemUI.vdex` and `framework-res.apk`
-from the device.
+from the device; live device logcat; `/sys/class/thermal/` sysfs on bnrv1300.
 
 ---
 
 ## Temperature thresholds
+
+### Battery temperature (nookPartner — `com.nook.partner`)
 
 All thresholds are in tenths of a degree Celsius (as reported by the
 `android.intent.action.BATTERY_CHANGED` broadcast's `temperature` extra).
@@ -21,6 +23,36 @@ All thresholds are in tenths of a degree Celsius (as reported by the
 | `CHG_TEMP_HIGH_ALARM`    | 480 | 48°C | Warning dialog |
 | `CHG_TEMP_LOW_ALARM`     | 80  | 8°C  | Warning dialog |
 | `CHG_TEMP_LOW_SHUTDOWN`  | 50  | 5°C  | Immediate shutdown |
+
+### Battery temperature (Android `BatteryService` — confirmed via logcat)
+
+The Nook's `BatteryService` logs `mShutdownBatteryHighTemperature` and
+`mShutdownBatteryLowTemperature` on every battery update. Values confirmed from
+a live device:
+
+| Field | Raw value | °C | Action |
+|-------|-----------|----|--------|
+| `mShutdownBatteryHighTemperature` | 500 | 50°C | Immediate shutdown |
+| `mShutdownBatteryLowTemperature`  | 50  | 5°C  | Immediate shutdown |
+
+These match the nookPartner thresholds exactly. `BatteryService` runs
+independently of `StatusBarService`, so this shutdown remains active even when
+`StatusBarService` is disabled.
+
+### CPU/GPU die temperature (kernel — confirmed via sysfs)
+
+Read from `/sys/class/thermal/thermal_zone*/trip_point_*_{type,temp}` on device.
+Values are in °C (this kernel reports directly in °C, not millidegrees).
+
+| Zone | Trip type | °C | Action |
+|------|-----------|-----|--------|
+| `cpu_thermal_zone` | passive | 65, 75, 85, 95, 105 | CPU frequency throttling |
+| `cpu_thermal_zone` | critical | 110 | Hard shutdown |
+| `gpu_thermal_zone` | passive | 95, 100, 105 | GPU frequency throttling |
+| `gpu_thermal_zone` | critical | 110 | Hard shutdown |
+
+Note: these are **die temperatures** from CPU/GPU sensors, not battery
+temperature. They are independent of the battery monitoring stack above.
 
 ---
 
