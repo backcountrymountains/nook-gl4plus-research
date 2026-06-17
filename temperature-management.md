@@ -86,6 +86,64 @@ temperature. They are independent of the battery monitoring stack above.
 
 ---
 
+## Battery temperature sensor placement
+
+### Question
+
+The `battery/temp` sysfs node could plausibly be measuring the fuel gauge IC die
+temperature, the case temperature near the chip, or an NTC thermistor embedded in
+the battery pack. This matters because:
+
+- If it reads the die or case: it may not reflect actual cell temperature, making
+  the thermal cutoffs unreliable (either firing too early or too late).
+- If it reads a pack-embedded NTC thermistor: it reflects cell temperature directly
+  and the cutoffs are meaningful.
+
+### Investigation (2026-06-17)
+
+Available temperature nodes on the device:
+
+| Node | Value at rest | Description |
+|------|--------------|-------------|
+| `/sys/class/power_supply/battery/temp` | 320 (32.0°C) | What BatteryService reads |
+| `/sys/class/power_supply/battery/batteryadc_degree` | 32°C | Battery ADC temperature |
+| `/sys/class/power_supply/battery/chipdieadc_degree` | 32°C | Fuel gauge IC die temperature |
+| `/sys/class/thermal/thermal_zone0/temp` (cpu_thermal_zone) | 42°C | CPU die |
+| `/sys/class/thermal/thermal_zone1/temp` (gpu_thermal_zone) | 40°C | GPU die |
+
+A CPU stress loop was run on the device for 60 seconds while all sensors were
+polled every 2 seconds. Results:
+
+| Sensor | Start | Peak | Change |
+|--------|-------|------|--------|
+| `battery/temp` | 32.0°C | 32.1°C | +0.1°C (noise) |
+| `batteryadc_degree` | 32°C | 33°C | +1°C (noise) |
+| `chipdieadc_degree` | 32°C | 33°C | +1°C (noise) |
+| `cpu_thermal_zone` | 42°C | 45°C | **+3°C** |
+| `gpu_thermal_zone` | 40°C | 43°C | **+3°C** |
+
+The CPU and GPU die temperatures rose measurably under load while all three
+battery-related sensors remained flat within noise. This thermal decoupling
+from the SoC strongly suggests `battery/temp` is **not** reading the fuel gauge
+die or the case surface near the chip.
+
+### Conclusion
+
+The battery temperature reading is thermally decoupled from the SoC. The most
+likely explanation is an NTC thermistor embedded in the battery pack, which is
+the correct sensor for cell temperature monitoring. This means the thermal
+cutoffs (48°C warning, 50°C shutdown) are measuring something meaningful rather
+than an incidental surface temperature.
+
+**Caveat:** this test used a single-core busy loop, which produces moderate SoC
+heating but minimal battery self-heating (low current draw). A stronger test
+would involve high-rate charging, where I²R heating inside the cell would diverge
+from the case if the sensor is cell-side rather than case-side. That test was not
+performed. What can be confirmed is that `battery/temp` is not simply
+proxying the SoC temperature.
+
+---
+
 ## Where the logic lives
 
 There are **two independent** temperature warning implementations on this device.
