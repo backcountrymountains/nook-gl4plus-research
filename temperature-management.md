@@ -144,7 +144,12 @@ To suppress both dialogs:
 
 ---
 
-## Shutdown action
+## Shutdown mechanisms
+
+Three independent layers can shut the device down due to temperature, at two
+different sensor types. All three were confirmed on bnrv1300 during investigation.
+
+### Layer 1 — nookPartner `BatteryIcon` (battery temp, 50°C)
 
 `BatteryIcon.shutdown()` sends:
 
@@ -157,6 +162,59 @@ context.startActivity(intent);
 This is the standard Android soft shutdown intent, handled by the system server.
 It is guarded by `EpdUtils.isEpdSimulator()` — on the real device that returns
 false, so shutdown always proceeds.
+
+**Status:** removed when `StatusBarService` is disabled (suppress-temp tweak).
+
+### Layer 2 — Android `BatteryService` (battery temp, 50°C)
+
+The Nook's customised `BatteryService` (in `services.vdex`) monitors battery
+temperature independently via `ACTION_BATTERY_CHANGED`. Fields confirmed from
+live device logcat:
+
+```
+mShutdownBatteryHighTemperature = 500   (50°C)
+mShutdownBatteryLowTemperature  = 50    (5°C)
+```
+
+When battery temp exceeds the threshold, `BatteryService` triggers
+`ShutdownThread` directly via the Android power manager — it does not go through
+`ACTION_REQUEST_SHUTDOWN`. The shutdown sequence observed in logcat:
+
+```
+I/BatteryService:    -->>> mBatteryProps.batteryTemperature .....500
+D/PowerManagerService: wakeLock: 'ShutdownThread-cpu'    ACQ
+D/PowerManagerService: wakeLock: 'ShutdownThread-screen' ACQ
+I/ShutdownThread: -=-=-=- wait for sleepscreen finish draw -=-=-=-=
+I/ShutdownThread: Shutting down package manager...
+I/ShutdownThread: Waiting for NFC, Bluetooth and Radio...
+I/ShutdownThread: NFC, Radio and Bluetooth shutdown complete.
+I/ShutdownThread: Shutting down StorageManagerService
+```
+
+Shutdown fired **immediately and precisely at 50°C** with no hysteresis, confirmed
+by a live step-test on 2026-06-17 (see "Live shutdown test" above).
+
+**Status:** still active after suppress-temp tweak. `BatteryService` is a system
+server process and is not affected by disabling `StatusBarService`.
+
+### Layer 3 — Kernel thermal governor (CPU/GPU die temp, 110°C)
+
+The AllWinner kernel exposes thermal zones via
+`/sys/class/thermal/thermal_zone*/trip_point_*_{type,temp}`. Confirmed values:
+
+| Zone | Type | °C | Action |
+|------|------|----|--------|
+| `cpu_thermal_zone` | passive | 65, 75, 85, 95, 105 | CPU frequency step-down |
+| `cpu_thermal_zone` | critical | **110** | Hard kernel shutdown |
+| `gpu_thermal_zone` | passive | 95, 100, 105 | GPU frequency step-down |
+| `gpu_thermal_zone` | critical | **110** | Hard kernel shutdown |
+
+This operates on CPU/GPU **die temperature**, not battery temperature — a
+different sensor entirely. The kernel thermal governor cannot be disabled from
+userspace. A `critical` trip triggers an immediate kernel-level power-off
+(harder than a clean Android shutdown).
+
+**Status:** always active; unaffected by any userspace tweak.
 
 ---
 
