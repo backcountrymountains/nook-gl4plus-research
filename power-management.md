@@ -108,8 +108,31 @@ The patch was written for the Nook Glowlight 4/4e. On the GL4 Plus:
   before deep sleep; if it is disabled (see
   [temperature-management.md](temperature-management.md)), WiFi/BT management
   must be handled separately (e.g., via KOReader's built-in WiFi toggle).
-- Actual battery savings vs. the GL4/GL4e have not been formally measured on the
-  GL4 Plus. Real-world comparison requires an unplugged reading session.
+- Battery savings on the GL4 Plus have been measured. See results below.
+
+### Measured battery drain on GL4 Plus (2026-06-03)
+
+Test conditions: fully unplugged, KOReader deep sleep + RTC wakeup
+(`/sys/class/rtc/rtc0/wakealarm`), 1 page/minute via battery drain test plugin.
+Backlight off. Root — `FLAG_KEEP_SCREEN_ON` held while reading.
+
+![Battery drain chart](https://raw.githubusercontent.com/backcountrymountains/nook-gl4plus-deepsleep/master/analysis/battery_drain_test_2026-06-03.png)
+
+| Metric | Value |
+|--------|-------|
+| Duration (unplugged) | 11.1 hours |
+| Page turns completed | 640 |
+| Battery drain | 100% → 89% (−11%) |
+| Drain rate | ~1% / hour |
+| Voltage drop | 4381 mV → 4240 mV (−141 mV) |
+| Avg discharge current | ~163 mA |
+
+At ~1%/hour with no backlight, a full charge gives approximately **100 hours of
+reading** at 1 page/minute. The two pink bands on the left of the chart are brief
+USB reconnections (~19 min and ~6 min) where the plugin automatically paused.
+
+Full chart and plot script:
+[nook-gl4plus-deepsleep/analysis/](https://github.com/backcountrymountains/nook-gl4plus-deepsleep/tree/master/analysis)
 
 ---
 
