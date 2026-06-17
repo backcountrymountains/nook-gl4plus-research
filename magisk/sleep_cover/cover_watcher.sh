@@ -1,27 +1,24 @@
 #!/system/bin/sh
-# Event-driven handler for two persistent Nook customisations:
+# Event-driven sleep cover propagation for the Nook GL4+.
 #
-#   1. slideUnlock suppression
-#      sys.mode.slideUnlock is reset to false on every "screen on" event so
-#      the Nook never shows the slide-to-unlock screen.  POWERHINT fires
-#      during the wake-up sequence, before SystemUI renders the lock screen,
-#      so this is both event-driven (no poll timer) and earlier than a poll.
+# Copies /sdcard/koreader/sleep_cover.png to all Art slots in
+# /system/media/SleepImageNook/ when the cover changes.
 #
-#   2. Sleep cover propagation
-#      Copies /sdcard/koreader/sleep_cover.png to all Art slots in
-#      /system/media/SleepImageNook/ when the cover changes.
-#
-#      Two triggers:
-#        "opening file"  — KOReader opened a book; wait 4s for render then copy.
-#        "screen on"     — device woke; copy if cover mtime changed during sleep.
-#      Screen-off is NOT used: the window between POWERHINT:screen OFF and
-#      kernel suspend is ~7ms, too short for a safe /system remount+copy.
+# Two triggers:
+#   "opening file"  — KOReader opened a book; wait 4s for render then copy.
+#   "screen on"     — device woke; copy if cover mtime changed during sleep.
+# Screen-on is the right time to copy: the B&N sleep screen service reads
+# the Art files on screen-off (to build the sleep image), not on screen-on,
+# so there is no reader that can race against the cp during wake.
+# Screen-off is NOT used: the window between POWERHINT:screen OFF and
+# kernel suspend is ~7ms — too short for a safe remount+copy, and the Art
+# files are actively being consumed by the sleep screen service at that point.
 #
 # Battery: logcat -s with a two-tag filter blocks in __skb_wait_for_more_packets
-# with no timer wakeups.  The slideUnlock setprop and cover stat fire only on
-# events (a handful per session), not on any timer.
+# with no timer wakeups.  The cover stat fires only on events (a handful per
+# session), not on any timer.
 
-MODULE_DIR=/data/adb/modules/no_slideunlock
+MODULE_DIR=/data/adb/modules/sleep_cover
 COVER_FILE=/sdcard/koreader/sleep_cover.png
 MTIME_TMP=/data/local/tmp/cover_watcher_mtime
 
@@ -42,8 +39,6 @@ while true; do
     logcat -s KOReader:I POWERHINT:I | while IFS= read -r line; do
         case "$line" in
             *"screen on"*)
-                # Reset slideUnlock before SystemUI renders the lock screen.
-                setprop sys.mode.slideUnlock false
                 # Copy cover if mtime changed OR if Art file size doesn't match
                 # (catches any case where mtime and reality diverged).
                 MTIME=$(stat -c %Y "$COVER_FILE" 2>/dev/null)
@@ -67,8 +62,6 @@ while true; do
                 ;;
         esac
     done
-    # logcat exited — reset slideUnlock as a failsafe during the restart gap,
-    # then pause briefly before restarting the watch.
-    setprop sys.mode.slideUnlock false
+    # logcat exited — pause briefly before restarting the watch.
     sleep 2
 done

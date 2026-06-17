@@ -1,6 +1,11 @@
 #!/system/bin/sh
 # Copies /sdcard/koreader/sleep_cover.png to all Nook Art slots.
 # Called by cover_watcher.sh on mtime change, or manually.
+#
+# The remount,rw is a VFS flag flip — no physical I/O to the block device.
+# It is safe to call during the Android resume sequence because the B&N sleep
+# screen service reads the Art files on screen-off, not screen-on, so there is
+# no reader racing against the cp here.
 
 SLEEP_DIR=/system/media/SleepImageNook
 COVER_SRC=/sdcard/koreader/sleep_cover.png

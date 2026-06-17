@@ -151,6 +151,22 @@ variants).
 screen, but it also reads it before showing the overlay on wake. A background watcher
 that resets it to `false` after each write effectively prevents the overlay.
 
+#### Decision: we chose not to suppress slide-to-unlock
+
+We implemented this and ran it for a while, then deliberately removed it. The
+problem: when the device is carried in a bag or pocket, the power button is
+sometimes pressed by accident, waking the device. Without the slide-to-unlock
+screen, these accidental wakes land directly in the reading app and silently turn
+pages. We came back to books with the wrong chapter open several times before
+tracing it to this.
+
+The slide-to-unlock screen acts as an accidental-input guard. Suppressing it
+makes sense in a fixed location (bedside reader, desk) but is a liability when
+the device travels.
+
+If you keep the device at a fixed location and find the slide-to-unlock
+screen annoying, the implementation below works:
+
 **Magisk module setup** (`/data/adb/modules/no_slideunlock/`):
 
 `module.prop`:

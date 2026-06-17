@@ -1,0 +1,6 @@
+id=sleep_cover
+name=KOReader Sleep Cover
+version=v1
+versionCode=1
+author=local
+description=Propagates /sdcard/koreader/sleep_cover.png to all Nook sleep screen Art slots on book open and screen wake. Also re-applies show_temperature_warning=0 on boot.
