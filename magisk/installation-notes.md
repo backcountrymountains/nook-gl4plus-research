@@ -115,8 +115,20 @@ adb reboot
 After reboot, verify it is running:
 
 ```sh
-adb shell su -c 'ps -A' | grep cover_watcher
-# should show a running sh process
+adb shell su -c 'grep -rl KOReader /proc/*/cmdline 2>/dev/null'
+# should print one or more /proc/<pid>/cmdline paths
+```
+
+`cover_watcher.sh` is a shell script so it appears as `sh` in `ps`, not by filename.
+The reliable indicator is its child `logcat` process, which is always started with
+`-s KOReader:I POWERHINT:I`. Grepping `/proc/*/cmdline` finds it by argument string.
+
+To also see the PID:
+
+```sh
+adb shell su -c 'for p in /proc/[0-9]*/cmdline; do
+    grep -q KOReader "$p" 2>/dev/null && echo "watcher logcat PID: $(basename $(dirname $p))"
+done'
 ```
 
 ### Using the deploy script instead

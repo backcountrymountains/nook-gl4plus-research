@@ -33,7 +33,7 @@ NEW=/data/adb/modules/sleep_cover
 OLD=/data/adb/modules/no_slideunlock
 $ADB shell su -c "ls -la $NEW"
 $ADB shell su -c "ls $OLD 2>/dev/null && echo 'ERROR: old module still present' || echo 'old module removed OK'"
-echo "Watcher processes:"
-$ADB shell su -c "ps -A" | grep -E "cover_watcher|logcat" || echo "WARNING: watcher not found in ps"
+echo "Watcher logcat process (cover_watcher.sh runs as 'sh' — identified by its logcat child):"
+$ADB shell su -c "grep -rl KOReader /proc/*/cmdline 2>/dev/null" || echo "WARNING: no KOReader logcat found — watcher may not be running"
 
 echo "=== Done ==="
