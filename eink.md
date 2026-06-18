@@ -481,6 +481,32 @@ Root cause is not fully explained — `sysfs` and `sysfs_vibrator` are both exis
 only `sysfs` rules persist. Likely related to Magisk 24.2's binary policy patcher having
 special handling or a known path for the `sysfs` type that it lacks for subtypes.
 
+**3. `sysfs_leds` (1 labeled node — lowest-impact active type)**
+
+After a full scan of sysfs subtype node counts on the live device, `sysfs_leds` was the
+most promising candidate: only 1 labeled node (a frontlight/LED brightness node), low
+security impact if made writable (apps can already control LEDs via Android APIs), and
+confirmed existing `untrusted_app` read access in the base policy.
+
+The AVC denial confirmed that `getattr` and `open` were already granted (`{ write }` was the
+only denial) — this is the "extending an existing rule" scenario that was hypothesized to
+work. It did not:
+
+```
+avc: denied { write } for name="force_update_mode"
+  scontext=u:r:untrusted_app:s0  tcontext=u:object_r:sysfs_leds:s0  permissive=0
+```
+
+The `allow untrusted_app sysfs_leds file write` rule did not survive the policy reload,
+identical to `sysfs_vibrator`.
+
+**Definitive conclusion:** Magisk 24.2 on this device can persistently patch `allow` rules
+only for the bare `sysfs` type. Custom types, unused platform types (`sysfs_vibrator`), and
+active subtypes with existing partial access (`sysfs_leds`) all fail identically — the added
+rules are applied as live patches that are erased by Android's post-`/data` policy reload.
+The mechanism that makes `sysfs` special is not documented and not reproducible with any
+other type. The broad `sysfs` rule is the only working solution on this Magisk version.
+
 ### Conclusion
 
 The broad `sysfs` rule is the only working solution with Magisk 24.2 on this device. The
