@@ -202,54 +202,68 @@ architecturally incompatible with per-page-turn GC16 in KOReader. The sysfs appr
 
 ### Magisk module: `epd_gc16`
 
-The sysfs node has two layers of access control that must both be resolved:
+The sysfs node has three layers of access control that must all be resolved:
 
 1. **DAC permissions**: `root:root rw-rw----` by default — `service.sh` runs `chmod 666` at boot.
-2. **SELinux**: even with `chmod 666`, Android's mandatory access control blocks writes from
-   `untrusted_app` context (`u:r:untrusted_app`) to `sysfs`-typed nodes (`u:object_r:sysfs`).
-   A `sepolicy.rule` in the module adds the necessary allow rule at boot.
+2. **SELinux type enforcement**: an allow rule is required for `untrusted_app` to write the node.
+3. **SELinux MLS constraint**: a `mlsconstrain` on `file { write }` requires the target type
+   to carry the `mlstrustedobject` attribute, OR the source and target MLS levels must match.
+   `untrusted_app` has categories (`s0:c512,c768`); sysfs nodes default to `s0` (no categories).
+   The levels therefore do not match, so the MLS constraint fails unless the node's type has
+   `mlstrustedobject`.
 
-The AVC denial (confirmed on device before the fix):
-```
-avc: denied { write } for name="force_update_mode"
-  scontext=u:r:untrusted_app:s0  tcontext=u:object_r:sysfs:s0  permissive=0
-```
+The `sysfs` type has `mlstrustedobject` (this is why the broad rule works). `sysfs_leds` does
+not — which is why all earlier targeted approaches were silently defeated by the MLS constraint
+even when the allow rule and label were correctly applied.
 
-**`/data/adb/modules/epd_gc16/sepolicy.rule`**:
-```
-allow untrusted_app sysfs file getattr
-allow untrusted_app sysfs file open
-allow untrusted_app sysfs file write
-```
+**`/data/adb/modules/epd_gc16/sepolicy.rule`**: intentionally empty. All rules are applied at
+runtime via `magiskpolicy --live` in `service.sh` to avoid Magisk 24.2's compiled-policy
+patching limitations with sysfs subtypes.
 
-Note: Magisk 24.2's `sepolicy.rule` parser requires one permission per line. Curly-brace
-syntax (`{ open write }`) is not parsed — the rule is silently dropped.
-
-**`/data/adb/modules/epd_gc16/service.sh`**:
+**`/data/adb/modules/epd_gc16/service.sh`** (targeted narrow solution — confirmed working):
 ```sh
 EPD_MODE=/sys/devices/virtual/disp/disp/waveform/force_update_mode
+
+# Phase 1: chmod and initialize (root can write sysfs regardless of SELinux type)
 i=0
 while [ ! -e "$EPD_MODE" ] && [ $i -lt 20 ]; do sleep 1; i=$((i+1)); done
 if [ -e "$EPD_MODE" ]; then
     chmod 666 "$EPD_MODE"
     echo 0 > "$EPD_MODE"
 fi
+
+# Phase 2: after boot_completed (post-restorecon), apply SELinux rules then relabel.
+# Both must happen after boot_completed: restorecon resets the chcon if applied too early,
+# and the MLS constraint must be resolved before the allow rule has any effect.
+(
+    i=0
+    while [ "$(getprop sys.boot_completed)" != "1" ] && [ $i -lt 120 ]; do
+        sleep 1; i=$((i+1))
+    done
+    if [ -e "$EPD_MODE" ]; then
+        magiskpolicy --live "typeattribute sysfs_leds mlstrustedobject"
+        magiskpolicy --live "allow untrusted_app sysfs_leds file { getattr open write }"
+        chcon u:object_r:sysfs_leds:s0 "$EPD_MODE"
+    fi
+) &
 ```
 
-**Security note:** the `sepolicy.rule` is intentionally broad — it allows all `untrusted_app`
-processes to open, read, write, and stat any sysfs node carrying the default `sysfs` label,
-not just the EPD waveform node.
+**Why `typeattribute` must come first**: the MLS constraint blocks `file:write` even when
+an allow rule exists. `typeattribute sysfs_leds mlstrustedobject` adds `sysfs_leds` to the
+`mlstrustedobject` attribute set in the live kernel policy, causing the constraint to pass.
+Without it, the allow rule has no effect.
 
-**Two targeted approaches were attempted and failed** — see the detailed analysis in the
-"Targeted approaches" subsection below.
+**Why `chcon` is in Phase 2**: `force_update_mode` defaults to `u:object_r:sysfs:s0` after
+every reboot (the genfscon fallback `sysfs / → sysfs`). Android's init runs `restorecon` that
+resets any early `chcon` before `boot_completed=1`. Applying `chcon` in Phase 2 (after
+`boot_completed`) ensures no subsequent restorecon resets the label.
 
-The vendor SELinux policy files were pulled and analyzed. Unused sysfs types confirmed on
-device (zero labeled nodes): `sysfs_vibrator`, `sysfs_nfc_power_writable`, `sysfs_uio`.
-Types with active nodes: `sysfs_zram` (74), `sysfs_zram_uevent` (1), `sysfs_debugfs_swsync`
-(1), `sysfs_cma_readable` (1).
-
-The broad `sysfs` rule is the only working solution with Magisk 24.2 on this device.
-The incremental security reduction over an already-rooted device is limited in practice.
+**Why `magiskpolicy --live` is used instead of `sepolicy.rule`**: Magisk 24.2's `sepolicy.rule`
+compiler bakes rules into the boot image at patch time. Rules that reference types not in the
+base policy are silently dropped. Rules for `sysfs_leds` subtypes (and custom types) are not
+compiled in — only the bare `sysfs` type has a known-working path through Magisk's patcher.
+`magiskpolicy --live` applied after `boot_completed=1` persists for the session because no
+further policy reload occurs (confirmed via MD5 polling).
 
 Source in: `nook-gl4plus-research/magisk/epd_gc16/`
 
@@ -424,10 +438,34 @@ SELinux type by the vendor.
 A malicious app could silently manipulate these without any Android permission prompt, since
 sysfs access is not part of the Android permission model.
 
-### Targeted approaches that were attempted and failed
+### Targeted approach — `sysfs_leds` with `mlstrustedobject` (WORKING ✓)
+
+The production module now uses `sysfs_leds` instead of the broad `sysfs` type, narrowing
+the security surface to one node. The three-phase investigation that led here:
+
+**Earlier failed attempts**: applying `allow untrusted_app sysfs_leds file write` (via
+`sepolicy.rule` or `magiskpolicy --live`) produced no effect. The root causes were:
+1. `sepolicy.rule` allow rules for `sysfs_leds` are not compiled into the boot image by
+   Magisk 24.2 (only the bare `sysfs` type has a known-working path through its patcher).
+2. Even when applied via `magiskpolicy --live`, the allow rule was insufficient because the
+   `sysfs_leds` type lacks the `mlstrustedobject` attribute required by the MLS constraint
+   (see security section above). AVC denials continued with exit 0 from `magiskpolicy`.
+3. The `chcon` was applied early in service.sh but reset before `boot_completed=1` by
+   Android init's `restorecon`.
+
+**The working combination** (see service.sh above):
+- `magiskpolicy --live "typeattribute sysfs_leds mlstrustedobject"` — satisfies MLS constraint
+- `magiskpolicy --live "allow untrusted_app sysfs_leds file { getattr open write }"` — type enforcement
+- `chcon u:object_r:sysfs_leds:s0 "$EPD_MODE"` — relabels the node after restorecon has run
+- All three applied after `boot_completed=1`, in that order
+
+Confirmed working on clean reboot: `Emperor EPD: force_update_mode=4 (waveform=0x80000004)`
+logged at first page load with no "Permission denied" errors.
+
+### Earlier targeted approaches that failed (pre-investigation)
 
 The ideal fix is to label only `force_update_mode` with a dedicated type and allow only
-that type. Two approaches were tried:
+that type. Two approaches were tried before the MLS constraint root cause was identified:
 
 **1. Custom type (`epd_waveform_node`) — "dual-pass" approach**
 
@@ -520,41 +558,54 @@ avc: denied { write } for name="force_update_mode"
 The `allow untrusted_app sysfs_leds file write` rule did not survive the policy reload,
 identical to `sysfs_vibrator`.
 
-**Definitive conclusion:** Magisk 24.2 on this device can persistently patch `allow` rules
-only for the bare `sysfs` type. Custom types, unused platform types (`sysfs_vibrator`), and
-active subtypes with existing partial access (`sysfs_leds`) all fail identically — the added
-rules are applied as live patches that are erased by Android's post-`/data` policy reload.
-The mechanism that makes `sysfs` special is not documented and not reproducible with any
-other type. The broad `sysfs` rule is the only working solution on this Magisk version.
+**Revised conclusion (June 2026, post-investigation):** The earlier conclusion that
+`magiskpolicy --live` silently drops allow rules for sysfs subtypes was INCORRECT. Direct
+testing confirmed that `magiskpolicy --live "allow untrusted_app sysfs_leds file write"`
+DOES add the rule to the live kernel policy — `sesearch` confirms the rule is present
+immediately after the call. The running policy also does not reload spontaneously during
+normal operation (60-second MD5 poll on `/sys/fs/selinux/policy` showed no changes).
 
-**Post-reload re-application also fails (June 2026):** A background fork in `service.sh`
-that waits for `sys.boot_completed=1` (guaranteed to fire after the policy reload) and then
-calls `magiskpolicy --live "allow untrusted_app sysfs_leds file write"` was tested. The
-call returns exit 0 with no errors, but AVC `{ write }` denials for `untrusted_app` on
-`sysfs_leds` continue indefinitely — confirmed via dmesg up to 468 seconds after boot with
-`boot_completed=1` already set. The rule has no effect. Separately confirmed that `adb
-shell su -c "magiskpolicy --live '...'"` produces "Syntax error in 'allow'" due to ADB
-shell quoting mangling the argument, but when the same command runs from within a shell
-script on the device it exits 0 and still has no effect on the policy.
+The actual root cause is a **label mismatch on reboot**:
 
-**Root cause:** Magisk 24.2's policy patcher silently drops `allow` rules for sysfs
-subtypes both at compile time (the `sepolicy.rule` path that patches the boot image) and at
-runtime (the `--live` path that patches the running kernel). The constraint is in the patcher
-itself, not in timing. No workaround exists short of modifying Magisk.
+1. The genfscon rule `genfscon sysfs /class/leds → sysfs_leds` exists in the policy but
+   is effectively dead code on this device — all entries under `/sys/class/leds/` are
+   symlinks whose labels resolve to the target node's label, which falls under the
+   fallback `genfscon sysfs / → sysfs` rule. Confirmed: `ls -Z /sys/class/leds/on_charge`
+   shows `u:object_r:sysfs:s0`, not `sysfs_leds`.
+2. `force_update_mode` is at `/devices/virtual/disp/disp/waveform/` — not covered by any
+   specific genfscon rule. After every reboot it gets `u:object_r:sysfs:s0` (the fallback).
+3. `magiskpolicy --live "allow untrusted_app sysfs_leds file write"` adds a rule for the
+   `sysfs_leds` type. But since the file has `sysfs` label, the rule is irrelevant.
+4. The AVC denials showing `tcontext=u:object_r:sysfs_leds:s0` in earlier tests came from
+   sessions where a manual `chcon` was still in effect (device not rebooted since the chcon).
+
+**The working targeted solution (untested at boot, proven interactively):**
+
+service.sh must do both — apply the allow rules AND relabel the file:
+
+```sh
+# After sys.boot_completed=1 (post-policy-reload):
+magiskpolicy --live "allow untrusted_app sysfs_leds file getattr"
+magiskpolicy --live "allow untrusted_app sysfs_leds file open"
+magiskpolicy --live "allow untrusted_app sysfs_leds file write"
+chcon u:object_r:sysfs_leds:s0 /sys/devices/virtual/disp/disp/waveform/force_update_mode
+```
+
+Confirmed working interactively: after applying all three rules and the chcon, a non-root
+shell process successfully wrote to `force_update_mode`. The broad `sysfs` rule in the
+current production module avoids needing the `chcon` entirely, which is why it works.
 
 ### Conclusion
 
-The broad `sysfs` rule is the only working solution with Magisk 24.2 on this device. The
-security trade-off is real but bounded in practice:
+The production module now uses a targeted `sysfs_leds` rule rather than the broad `sysfs`
+rule. The security surface is limited to one type (`sysfs_leds`), which on this device has
+only one labeled node (`force_update_mode` after our `chcon`). Any installed app can write
+that node, but cannot write CPU governor, thermal, battery, or other sysfs nodes via this
+rule — unlike the broad `sysfs` rule which covered all unlabeled sysfs nodes.
 
-- The device is personal, single-user, and already rooted with Magisk — the security bar is
-  already significantly lowered by the presence of root itself.
-- The rule allows any installed app to write arbitrary sysfs nodes. On this device the
-  practical impact is limited to display, battery, and thermal manipulation — annoying but
-  not a data exfiltration risk.
-- A future Magisk version that can apply allow rules for platform-defined sysfs subtypes
-  would allow the `sysfs_vibrator` approach to be revisited without any code changes —
-  only the `sepolicy.rule` and `service.sh` files need updating.
+The `mlstrustedobject` attribute added to `sysfs_leds` is a recognized Android attribute
+for sysfs objects that need to be writable by untrusted processes (the LED brightness node
+is the canonical example). Adding it to `sysfs_leds` is consistent with its intent.
 
 ---
 
