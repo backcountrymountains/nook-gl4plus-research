@@ -8,223 +8,91 @@ actual kernel control point — three mechanisms were tried before the working o
 
 ---
 
-## Baseline: what controls the screen without any EPD controller code
+## Baseline
 
-The AllWinner EPD driver has its own internal waveform selection logic and defaults to
-**GU16 (`mode=0x200084`)** for all display updates when nothing overrides it.
-
-When KOReader writes pixels via `ANativeWindow`, the display compositor passes those buffers
-directly to the AllWinner driver, which picks a waveform autonomously. This is why the
-failed approaches below didn't cause crashes or visible errors — they were no-ops layered on
-top of a driver that was already refreshing the screen with GU16 defaults.
-
-**B&N's own reader** works differently: it runs as a system app with platform privileges,
-uses the Android View draw cycle, and calls `View.invalidate(int)` or sets `SystemProperties`
-to hint the waveform. That hint propagates through the View compositor path to the driver.
-KOReader bypasses that entire path, so the hints never arrive — but the driver still refreshes
-using its own GU16 default.
-
-This is why GC16 never worked in KOReader before our sysfs approach: there was no path for a
-non-system app using `ANativeWindow` to force a different waveform. The filing of
-[koreader/koreader#14574](https://github.com/koreader/koreader/issues/14574) was the result
-— full refreshes showed no flash because the driver always used GU16.
+The AllWinner EPD driver defaults to **GU16 (`mode=0x200084`)** for all display updates.
+KOReader renders via `ANativeWindow` (direct buffer, bypassing the Android View draw cycle),
+so B&N's `View.invalidate(int)` waveform hints never reach the driver for KOReader's frames.
+This is why GC16 never worked before: there was no path for a non-system app using
+`ANativeWindow` to force a different waveform.
 
 ---
 
-## What was tried and what failed
+## What was tried
 
-### 1. `Surface.einkChangeQuickUpdateMode` — does NOT reach the kernel driver
+### 1. `Surface.einkChangeQuickUpdateMode` — no kernel effect
 
-`com.nook.partner.EpdDisplayControllerImpl` calls this for full refresh (mode 5):
+Called without exception from KOReader but dmesg showed every update still at `mode=0x200084`
+(GU16). `SystemProperties.set()` for `persist.mode.quick`/`persist.mode.global` also requires
+platform privileges — unavailable to a non-system app.
 
-```java
-// From decompiled EpdDisplayControllerImpl.java
-SystemPropertiesProxy.set(context, "persist.mode.quick", Integer.toHexString(0x80000004));
-SystemPropertiesProxy.set(context, "persist.mode.global", "0");
-Surface.class.getDeclaredMethod("einkChangeQuickUpdateMode", Integer.TYPE)
-    .invoke(Surface.class.newInstance(), 0x80000004);
-```
+### 2. `View.invalidate(int mode)` — no kernel effect
 
-From a non-system app (KOReader), `einkChangeQuickUpdateMode` fires without exception but
-**does not change the kernel waveform mode**. Verified via dmesg — every page turn kept
-showing `mode=0x200084` (GU16) regardless of how many times we called the method.
-
-The system properties (`persist.mode.quick`, `persist.mode.global`) also can't be set from
-a non-system app: `SystemProperties.set()` requires platform privileges.
-
-### 2. `View.invalidate(int mode)` — fires but does not change kernel mode
-
-B&N's custom AOSP adds a hidden `View.invalidate(int)` overload that routes the integer as
-an EPD waveform hint. Used by B&N's reader for fast page turns:
-
-```java
-// B&N reader page turn: mapToUpdateMode(8) = 75497474 = DITHERING_SIMPLE | DU_MODE
-View.class.getDeclaredMethod("invalidate", Integer.TYPE).invoke(view, 75497474);
-```
-
-We tried calling this with `mode=4` (GC16) and `mode=0x80000004` (GC16|NO_MERGE).
-Logcat confirmed the calls landed (`Emperor EPD invalidate: driverMode=0x4`), but
-dmesg showed no change — still `mode=0x200084` for every update.
-
-**Root cause**: KOReader renders via `ANativeWindow` (direct buffer, not the Android View
-draw cycle). The `View.invalidate(int)` waveform hint is processed by `sunxihwc_eink` —
-the AllWinner Hardware Composer for e-ink — but only for frames that flow through the
-View draw cycle. KOReader's `ANativeWindow` frames bypass the View system entirely, so
-`sunxihwc_eink` never sees the hint for KOReader's frames.
-
-This was confirmed in [koreader/koreader#11110](https://github.com/koreader/koreader/issues/11110):
-`View.invalidate(-2147483644)` (GC16|NO_MERGE) DOES produce `refreshMode= NO_MERGE GC16_MODE`
-in logcat when called from the TestActivity (which uses a view hierarchy), but the same call
-from KOReader's native activity produces only `refreshMode= GU16_MODE`.
+Logcat confirmed calls landed (`Emperor EPD invalidate: driverMode=0x4`), but dmesg showed
+no change. Root cause: `sunxihwc_eink` only processes waveform hints for frames flowing
+through the View draw cycle. KOReader's `ANativeWindow` frames bypass that path entirely.
+Confirmed in [koreader/koreader#11110](https://github.com/koreader/koreader/issues/11110).
 
 ### 3. `force_update_mode` sysfs (WORKING ✓)
-
-The AllWinner display driver exposes a sysfs control node:
 
 ```
 /sys/devices/virtual/disp/disp/waveform/force_update_mode
 ```
 
-Writing an integer to this file forces the EPD waveform for the next display update.
-Verified via dmesg:
+Writing an integer forces the EPD waveform for the next display update:
 
 ```
-# Before (default):
-mode=0x200084  total=29  waveform_paddr=0x001af164   ← GU16 + GAMMA_CORRECT
+# Before: echo 0 > force_update_mode
+mode=0x200084  waveform_paddr=0x001af164  ← GU16
 
-# After: echo 4 > force_update_mode
-mode=0x200004  total=29  waveform_paddr=0x00064b40   ← GC16 + GAMMA_CORRECT (different LUT!)
+# After:  echo 4 > force_update_mode
+mode=0x200004  waveform_paddr=0x00064b40  ← GC16 (different LUT)
 ```
 
-The waveform address change confirms a completely different LUT is being loaded for GC16.
+### 4. `com.nook.action.full_refresh` broadcast — wrong frame
 
-### 4. `com.nook.action.full_refresh` broadcast intent — potential no-root path (untested for KOReader)
-
-Discovered in [koreader/koreader#11110](https://github.com/koreader/koreader/issues/11110).
-`com.nook.partner` exposes a broadcast intent that triggers a full GC16 refresh:
-
+ADB broadcast confirmed working on bnrv1300:
 ```sh
 adb shell am broadcast -p com.nook.partner -a com.nook.action.full_refresh
 ```
+Produced `mode=0x80200004` in dmesg. Cold-start latency: ~7s. Warm: ~160ms.
 
-Internally `com.nook.partner` (a system app with platform privileges) handles the intent by calling:
-```java
-SystemPropertiesProxy.set(context, "persist.mode.quick", Integer.toHexString(0x80000004));
-Surface.einkChangeQuickUpdateMode(-2147483644);  // EINK_NO_MERGE | EINK_GC16_MODE
-```
+Integrated into `NookEmperorEPDController.setEpdMode` and tested with "full refresh every
+page." Result: GC16 always flashed the **OLD page** before the new page appeared.
 
-Because the handler runs inside the system app's process, `SystemProperties.set()` succeeds
-and the call propagates through `sunxihwc_eink` to produce a GC16 commit — no root required.
+Root cause: `einkChangeQuickUpdateMode` forces GC16 of what the EPD hardware is **currently
+displaying**, not the next queued buffer. `setEpdMode` is called after
+`ANativeWindow_unlockAndPost`, but the EPD is still mid-GU16 waveform on the previous page
+(~260ms). The broadcast fires ~160ms later onto that in-progress waveform.
 
-KOReader could trigger this via:
-```kotlin
-context.sendBroadcast(
-    Intent("com.nook.action.full_refresh").setPackage("com.nook.partner")
-)
-```
-
-**Testing procedure:**
-
-1. Confirm bnrv1300 support via ADB first (confirmed on bnrv1000/1100 only — bnrv1300 untested):
-   ```sh
-   adb shell am broadcast -p com.nook.partner -a com.nook.action.full_refresh
-   adb logcat -d | grep "sunxihwc_eink"   # expect: refreshMode= NO_MERGE GC16_MODE
-   adb shell dmesg | grep "mode=0x2000"   # expect: mode=0x200004
-   ```
-2. Add a temporary broadcast path in `NookEmperorEPDController.setEpdMode` and use
-   "Full refresh rate → Every page" to trigger it on every page turn. Observe:
-   - Does the GC16 flash show the new page or the previous one?
-   - Does it double-flash (GU16 then GC16)?
-   - Do dmesg timestamps show `mode=0x200004` before or after the ANativeWindow commit?
-3. Try deliberate delays (50ms, 150ms, 250ms) between render and broadcast send to probe
-   whether there is any window where ordering works correctly.
-
-**Concerns:**
-
-1. **The race condition is structural.** The sysfs approach is synchronous: write `4` →
-   `ANativeWindow` commits → HWC picks up forced mode → GC16. The broadcast is async:
-   `sendBroadcast` → Android routes to `com.nook.partner` → service wakes → calls
-   `einkChangeQuickUpdateMode`. That dispatch chain takes ~160ms based on issue #11110
-   logcat timestamps. KOReader's `ANativeWindow` frame has almost certainly already been
-   committed with GU16 before the handler fires.
-
-2. **Which frame does GC16 flash?** `einkChangeQuickUpdateMode` may either (a) set a flag
-   for the next natural compositor commit, or (b) force an immediate refresh of whatever is
-   currently in the framebuffer. If (a), by the time the flag is set, KOReader's frame is
-   gone and the next compositor event (a UI update, a clock tick) gets GC16 instead. If (b),
-   it flashes a stale frame. Neither reliably lands on the new page KOReader just rendered.
-
-3. **The 2× GU16 before GC16 pattern.** Issue #11110 logcat showed this consistently even
-   from the TestActivity (which has a view hierarchy and tight synchronization). GC16 doesn't
-   arrive on the first compositor commit after the call — it takes at least two cycles. For
-   KOReader's detached ANativeWindow path this is likely worse.
-
-4. **Double-flash risk.** Even in the best case the sequence may be: KOReader commits frame
-   → GU16 commit → broadcast lands → GC16 commit of the same frame. The user sees two
-   refreshes per page turn.
-
-5. **Silent failure.** Broadcast delivery is fire-and-forget. If `com.nook.partner` is
-   stopped, crashed, or B&N renames the intent in a firmware update, nothing happens and
-   there is no way to detect or fall back.
-
-6. **Harder to justify upstream than sysfs.** A sysfs write with a graceful `IOException`
-   fallback is straightforward to reason about. A dependency on a proprietary B&N service
-   being alive is a harder argument to make to upstream maintainers — even though sysfs
-   requires root and the broadcast does not.
-
-**Test results (bnrv1300, June 2026):**
-
-ADB broadcast confirmed working on bnrv1300 — screen flashed GC16 (`mode=0x80200004`
-in dmesg). Service cold-start latency: ~7s. Warm latency: ~160ms.
-
-Integrated into `NookEmperorEPDController.setEpdMode` and tested with "full refresh
-every page." Result: GC16 always flashed the OLD page before the new page appeared.
-
-Root cause: `einkChangeQuickUpdateMode` forces GC16 of what the EPD hardware is
-**currently displaying**, not the next queued buffer. In KOReader's rendering pipeline
-(`framebuffer_android.lua`), `setEpdMode` is called immediately after
-`ANativeWindow_unlockAndPost` — but the EPD hardware is still mid-GU16 waveform on the
-previous page (~260ms animation). The broadcast fires ~160ms later onto the in-progress
-old-page waveform.
-
-This is fundamentally different from the sysfs approach: `force_update_mode=4` is a
-driver flag read when the next queued buffer is processed, so it correctly arms GC16 for
-the *incoming* page. No timing fix exists for the broadcast path — even a 400ms delay
-produces a double-flash (GU16 then GC16 on the same page) at 800ms+ total latency.
-
-**Bottom line:** the broadcast works as a standalone "clean the screen" command but is
-architecturally incompatible with per-page-turn GC16 in KOReader. The sysfs approach
-(Magisk module) is the only correct solution for this hardware.
+This is fundamentally different from the sysfs approach: `force_update_mode=4` is a driver
+flag read when the next queued buffer is processed, so it correctly arms GC16 for the
+*incoming* page. No timing fix exists — the broadcast works as a standalone "clean the screen"
+command but is architecturally incompatible with per-page-turn GC16.
 
 ---
 
-## How the working implementation works
+## Working implementation
 
 ### Magisk module: `epd_gc16`
 
-The sysfs node has three layers of access control that must all be resolved:
+The sysfs node has three access control layers that must all be resolved:
 
 1. **DAC permissions**: `root:root rw-rw----` by default — `service.sh` runs `chmod 666` at boot.
-2. **SELinux type enforcement**: an allow rule is required for `untrusted_app` to write the node.
-3. **SELinux MLS constraint**: a `mlsconstrain` on `file { write }` requires the target type
-   to carry the `mlstrustedobject` attribute, OR the source and target MLS levels must match.
-   `untrusted_app` has categories (`s0:c512,c768`); sysfs nodes default to `s0` (no categories).
-   The levels therefore do not match, so the MLS constraint fails unless the node's type has
-   `mlstrustedobject`.
+2. **SELinux type enforcement**: allow rule for `untrusted_app` to write the node.
+3. **SELinux MLS constraint**: the target type must carry `mlstrustedobject`, OR source and
+   target MLS levels must match. `sysfs_leds` lacks this attribute by default, so the constraint
+   blocks writes even when an allow rule exists. `typeattribute sysfs_leds mlstrustedobject` fixes it.
 
-The `sysfs` type has `mlstrustedobject` (this is why the broad rule works). `sysfs_leds` does
-not — which is why all earlier targeted approaches were silently defeated by the MLS constraint
-even when the allow rule and label were correctly applied.
+All SELinux rules are applied via `magiskpolicy --live` after `boot_completed=1`. `sepolicy.rule`
+is intentionally empty — Magisk 24.2's compiled-policy patcher only reliably handles the bare
+`sysfs` type; rules for subtypes must be applied live to survive Android init's `restorecon`.
 
-**`/data/adb/modules/epd_gc16/sepolicy.rule`**: intentionally empty. All rules are applied at
-runtime via `magiskpolicy --live` in `service.sh` to avoid Magisk 24.2's compiled-policy
-patching limitations with sysfs subtypes.
-
-**`/data/adb/modules/epd_gc16/service.sh`** (targeted narrow solution — confirmed working):
+**`/data/adb/modules/epd_gc16/service.sh`** (confirmed working on clean reboot):
 ```sh
 EPD_MODE=/sys/devices/virtual/disp/disp/waveform/force_update_mode
 
-# Phase 1: chmod and initialize (root can write sysfs regardless of SELinux type)
+# Phase 1: chmod (root can write sysfs regardless of SELinux type)
 i=0
 while [ ! -e "$EPD_MODE" ] && [ $i -lt 20 ]; do sleep 1; i=$((i+1)); done
 if [ -e "$EPD_MODE" ]; then
@@ -232,9 +100,7 @@ if [ -e "$EPD_MODE" ]; then
     echo 0 > "$EPD_MODE"
 fi
 
-# Phase 2: after boot_completed (post-restorecon), apply SELinux rules then relabel.
-# Both must happen after boot_completed: restorecon resets the chcon if applied too early,
-# and the MLS constraint must be resolved before the allow rule has any effect.
+# Phase 2: after boot_completed (post-restorecon), apply SELinux rules then relabel
 (
     i=0
     while [ "$(getprop sys.boot_completed)" != "1" ] && [ $i -lt 120 ]; do
@@ -248,22 +114,10 @@ fi
 ) &
 ```
 
-**Why `typeattribute` must come first**: the MLS constraint blocks `file:write` even when
-an allow rule exists. `typeattribute sysfs_leds mlstrustedobject` adds `sysfs_leds` to the
-`mlstrustedobject` attribute set in the live kernel policy, causing the constraint to pass.
-Without it, the allow rule has no effect.
-
-**Why `chcon` is in Phase 2**: `force_update_mode` defaults to `u:object_r:sysfs:s0` after
-every reboot (the genfscon fallback `sysfs / → sysfs`). Android's init runs `restorecon` that
-resets any early `chcon` before `boot_completed=1`. Applying `chcon` in Phase 2 (after
-`boot_completed`) ensures no subsequent restorecon resets the label.
-
-**Why `magiskpolicy --live` is used instead of `sepolicy.rule`**: Magisk 24.2's `sepolicy.rule`
-compiler bakes rules into the boot image at patch time. Rules that reference types not in the
-base policy are silently dropped. Rules for `sysfs_leds` subtypes (and custom types) are not
-compiled in — only the bare `sysfs` type has a known-working path through Magisk's patcher.
-`magiskpolicy --live` applied after `boot_completed=1` persists for the session because no
-further policy reload occurs (confirmed via MD5 polling).
+Phase 2 ordering is critical: `typeattribute` must come before the `allow` rule (MLS constraint
+is checked before type enforcement). `chcon` must come last (relabels the node under the new
+policy). All three must run after `boot_completed=1` — init's `restorecon` resets any earlier
+`chcon`, and no further policy reload occurs after that point.
 
 Source in: `nook-gl4plus-research/magisk/epd_gc16/`
 
@@ -283,7 +137,7 @@ override fun setEpdMode(targetView: View, mode: Int, ...) {
 }
 
 override fun resume() {
-    // Reset to 0 so partial refreshes use default GU16 after resume.
+    // Reset so partial refreshes use GU16 default after resume.
     try { File(FORCE_UPDATE_MODE).writeText("0") } catch (_: IOException) {}
 }
 ```
@@ -294,7 +148,7 @@ override fun resume() {
 
 From `sunxi-kobo.h`, decompiled `EpdDisplayControllerImpl.java`, and
 [koreader/koreader#11110](https://github.com/koreader/koreader/issues/11110). Constants
-marked ✓ were confirmed by name+value match between the Nook decompile and `sunxi_kobo_h.lua`.
+marked ✓ confirmed by name+value match between Nook decompile and `sunxi_kobo_h.lua`.
 
 | Constant | Value | Kernel mode | Description |
 |---|---|---|---|
@@ -319,15 +173,48 @@ marked ✓ were confirmed by name+value match between the Nook decompile and `su
 | `EINK_GAMMA_CORRECT` ✓ | `0x200000` | — | Driver adds this automatically |
 | `UI_FULL_REFRESH` | `0x80000004` | `0x200004` | `EINK_NO_MERGE \| EINK_GC16_MODE`; B&N's full redraw constant |
 
-The driver always OR-s `EINK_GAMMA_CORRECT (0x200000)` into the mode value when presenting
-to the EPD panel — visible in dmesg as the `0x200000` high bits.
+The driver always OR-s `EINK_GAMMA_CORRECT (0x200000)` into the mode value.
+`EINK_NO_MERGE` bypasses AllWinner HWC collision/damage merging (described by NiLuJe as
+"hilariously broken" — refresh requests can be silently optimized away without it). B&N
+always uses it for full refreshes.
 
-`EINK_NO_MERGE` (`Integer.MIN_VALUE` in Java) bypasses the AllWinner HWC collision/damage
-merging logic, which is described by NiLuJe as "hilariously broken" — refresh requests can
-be silently "optimized" away without it. B&N always uses it for full refreshes.
+---
 
-`EINK_AUTO_MODE` is `0x8000` on both Nook and Kobo/sunxi. The value `5` seen in some
-contexts is GL16 on mxcfb NTX kernels (a different SoC family) and was a misidentification.
+## force_update_mode sysfs constraints
+
+The `force_update_mode` node is a simple waveform selector register, not a full mode word.
+Experimentally confirmed constraints:
+
+- **Accepted values only**: The sysfs store handler validates `val >= 0` after parsing.
+  Any value with the MSB set (e.g. `EINK_NO_MERGE | EINK_GC16_MODE = 0x80000004`) is
+  rejected with `ERANGE`. Writing the signed decimal `-2147483644` is also rejected —
+  the driver does not accept negative values regardless of encoding.
+- **Only base waveform indices work**: flag bits (`EINK_NO_MERGE`, `EINK_GAMMA_CORRECT`,
+  etc.) cannot be set through this node.
+
+Results of all waveforms tested via this node:
+
+| Value | Write accepted? | Result |
+|---|---|---|
+| `0` | ✓ | Resets to driver default (GU16) |
+| `0x04` (GC16) | ✓ | Clean full refresh — in use |
+| `0x84` (GU16) | ✓ | Identical to default; redundant |
+| `0x02` (DU) | ✓ | Updates occur but destroy anti-aliasing — unusable for text |
+| `0x40` (GLR16/REAGL) | ✓ | Write accepted, driver silently ignores it; no screen update |
+| `0x80000004` (GC16 + NO_MERGE) | ✗ ERANGE | MSB rejected |
+
+**Conclusion**: GC16 (`0x04`) for full refresh and GU16 default (`0`) for all other modes
+is the optimal and complete configuration for this device through the sysfs path.
+GLR16 is supported on the NGL4 via the `View.invalidate()` / HWC pipeline — a path
+unavailable to KOReader's `ANativeWindow` rendering.
+
+### KOReader "fast" refresh path
+
+KOReader's `"fast"` waveform mode (used during scrolling) never fires in practice on
+this device. UIManager coalesces refresh requests by priority (`fast=2 < ui=3`), so any
+`"fast"` request that overlaps with a `"ui"` request in the same frame is silently
+upgraded to `"ui"`. Since e-ink menus avoid momentum scrolling, the `"fast"` path
+has no reachable trigger in normal KOReader usage on the GL4+.
 
 ---
 
@@ -335,8 +222,7 @@ contexts is GL16 on mxcfb NTX kernels (a different SoC family) and was a misiden
 
 ### `getMode()` — `"all"`
 
-`NookEmperorEPDController.getMode()` returns `"all"`. In `framebuffer_android.lua` this
-means `setEpdMode` is called for every refresh type:
+`NookEmperorEPDController.getMode()` returns `"all"`:
 
 | Refresh path | `setEpdMode` called? | sysfs write |
 |---|---|---|
@@ -345,40 +231,15 @@ means `setEpdMode` is called for every refresh type:
 | `refreshUIImp` | Yes | `0` (GU16 default) |
 | `refreshFastImp` | Yes | `0` (GU16 default) |
 
-**Why `"all"` and not `"full-only"`**: `force_update_mode` is a persistent kernel state —
-once written, it applies to every subsequent display commit until explicitly reset. With
-`"full-only"`, `setEpdMode` is only called for full refreshes. After a full refresh writes
-`4` (GC16), partial refreshes, UI redraws, and clock ticks all hit the driver while
-`force_update_mode` is still `4`, causing spurious GC16 flashes on every display update
-until KOReader is closed or `resume()` fires.
-
-With `"all"`, every partial/UI/fast refresh calls `setEpdMode` with a non-full mode, which
-writes `0` back before that commit. The mode is correctly scoped to each individual refresh.
-
-This was discovered by observing ~50-second periodic flashing on the device after the first
-page turn — confirmed in dmesg as GC16 commits (`mode=0x200004`) that did not correspond to
-any user input.
-
-**A reviewer of the upstream PR noted:** *"It should be 'all' if the partial modes you
-implemented are working in the KOReader GUI."* This is now confirmed — `"all"` is correct
-and `"full-only"` produces the spurious-flash bug described above.
-
-**No-root note:** for upstream merging, the controller degrades gracefully without the
-Magisk module — all sysfs writes fail silently with `IOException` and the driver uses its
-GU16 default for every refresh. The broadcast intent (`com.nook.action.full_refresh`) is
-the only known no-root candidate for full GC16 refreshes but is untested in KOReader's
-rendering path — see "What was tried" section 4.
+`force_update_mode` is persistent kernel state. With `"full-only"`, partial refreshes, UI
+redraws, and clock ticks all fire as GC16 until `resume()` runs — observed as ~50-second
+periodic flashing after the first page turn. `"all"` resets to `0` before each non-full
+refresh, correctly scoping the mode to each individual update.
 
 ### KOReader full refresh rate setting
 
-Stored in `settings.reader.lua` as `full_refresh_count`:
-- `1` = Every page
-- `6` = Every 6 pages (default)
-- `0` = Never
-- `-1` = Every chapter
-
-`FULL_REFRESH_COUNT` is the live in-memory value (`UIManager.FULL_REFRESH_COUNT`);
-`full_refresh_count` + `night_full_refresh_count` are the persisted keys.
+`full_refresh_count` in `settings.reader.lua`: `1` = Every page, `6` = Every 6 pages
+(default), `0` = Never, `-1` = Every chapter.
 
 ### EPD factory routing
 
@@ -395,246 +256,42 @@ MANUFACTURER == "barnesandnoble" && MODEL == "bnrv1300" -> Id.NOOK_GL4PLUS
 
 ---
 
-## Security implications of the Magisk module
+## Security: SELinux access control
 
-### Two access control layers
+Getting `force_update_mode` writable from an unprivileged app requires bypassing two layers:
 
-Getting `force_update_mode` writable from an unprivileged app requires bypassing two
-independent layers:
+1. **DAC**: `chmod 666` — straightforward.
+2. **SELinux**: both type enforcement AND the MLS constraint must pass. `sysfs_leds` lacks
+   `mlstrustedobject` by default, so `allow untrusted_app sysfs_leds file write` alone is
+   insufficient — the MLS constraint rejects the write first. `typeattribute sysfs_leds mlstrustedobject`
+   satisfies the constraint.
 
-1. **DAC (file permissions)**: `chmod 666` in `service.sh` — straightforward.
-2. **SELinux MAC**: the node carries `u:object_r:sysfs:s0` and Android blocks
-   `untrusted_app` from writing `sysfs`-labeled files. `chmod 666` alone is not enough;
-   SELinux enforces on top of DAC regardless of file mode bits.
+The production module uses `sysfs_leds` (1 labeled node on this device after our `chcon`:
+`force_update_mode` itself). This limits blast radius vs. the broad `sysfs` rule, which would
+grant any installed app write access to all unlabeled sysfs nodes — CPU governor, thermal
+thresholds, battery controls, etc. — without any Android permission prompt.
 
-AVC denials confirmed on device (each denied in sequence; each blocks before the next):
+AVC denials confirmed on device (all three blocked before the fix):
 ```
 avc: denied { getattr } for name="force_update_mode"
-  scontext=u:r:untrusted_app:s0  tcontext=u:object_r:sysfs:s0  permissive=0
-avc: denied { open } for name="force_update_mode"
-  scontext=u:r:untrusted_app:s0  tcontext=u:object_r:sysfs:s0  permissive=0
-avc: denied { write } for name="force_update_mode"
-  scontext=u:r:untrusted_app:s0  tcontext=u:object_r:sysfs:s0  permissive=0
-```
-
-Java's `File.writeText()` calls `stat()` first (`getattr`), then `open(O_WRONLY)` (`open` +
-`write`). All three must be allowed. The `read` permission is not needed — KOReader only
-writes to the node, never reads from it.
-
-### The working rule and why it's broad
-
-```
-allow untrusted_app sysfs file getattr
-allow untrusted_app sysfs file open
-allow untrusted_app sysfs file write
-```
-
-This grants every installed app the ability to stat, open for write, and write **any** sysfs
-node carrying the default `sysfs` label — not just the EPD waveform node. On Android 8.1
-that includes CPU frequency/governor nodes, thermal throttling thresholds, battery and
-charging control nodes, and other hardware registers that haven't been given a more specific
-SELinux type by the vendor.
-
-A malicious app could silently manipulate these without any Android permission prompt, since
-sysfs access is not part of the Android permission model.
-
-### Targeted approach — `sysfs_leds` with `mlstrustedobject` (WORKING ✓)
-
-The production module now uses `sysfs_leds` instead of the broad `sysfs` type, narrowing
-the security surface to one node. The three-phase investigation that led here:
-
-**Earlier failed attempts**: applying `allow untrusted_app sysfs_leds file write` (via
-`sepolicy.rule` or `magiskpolicy --live`) produced no effect. The root causes were:
-1. `sepolicy.rule` allow rules for `sysfs_leds` are not compiled into the boot image by
-   Magisk 24.2 (only the bare `sysfs` type has a known-working path through its patcher).
-2. Even when applied via `magiskpolicy --live`, the allow rule was insufficient because the
-   `sysfs_leds` type lacks the `mlstrustedobject` attribute required by the MLS constraint
-   (see security section above). AVC denials continued with exit 0 from `magiskpolicy`.
-3. The `chcon` was applied early in service.sh but reset before `boot_completed=1` by
-   Android init's `restorecon`.
-
-**The working combination** (see service.sh above):
-- `magiskpolicy --live "typeattribute sysfs_leds mlstrustedobject"` — satisfies MLS constraint
-- `magiskpolicy --live "allow untrusted_app sysfs_leds file { getattr open write }"` — type enforcement
-- `chcon u:object_r:sysfs_leds:s0 "$EPD_MODE"` — relabels the node after restorecon has run
-- All three applied after `boot_completed=1`, in that order
-
-Confirmed working on clean reboot: `Emperor EPD: force_update_mode=4 (waveform=0x80000004)`
-logged at first page load with no "Permission denied" errors.
-
-### Earlier targeted approaches that failed (pre-investigation)
-
-The ideal fix is to label only `force_update_mode` with a dedicated type and allow only
-that type. Two approaches were tried before the MLS constraint root cause was identified:
-
-**1. Custom type (`epd_waveform_node`) — "dual-pass" approach**
-
-The idea: declare a custom type, label only the EPD node with it, write targeted `allow`
-rules for that type only. A bare `type` declaration (no attributes) works in Magisk 24.2's
-`sepolicy.rule` parser — the type is successfully added to the compiled policy. The
-`associate` permission for the `sysfs` filesystem can also be applied with correct syntax
-(no curly braces):
-
-```
-# sepolicy.rule — type declaration survives; allow rules do not (see below)
-type epd_waveform_node
-allow epd_waveform_node sysfs filesystem associate
-allow untrusted_app epd_waveform_node file open
-allow untrusted_app epd_waveform_node file write
-allow untrusted_app epd_waveform_node file getattr
-```
-
-The fundamental failure: **Android init reloads the SELinux policy from compiled images
-during boot (around the time `/data` is decrypted), after Magisk's `service.sh` has run.**
-Rules applied via `magiskpolicy --live` — whether from `service.sh` or interactively via
-`adb shell su` — are live kernel patches that are erased by this reload. The `type` declaration
-survives because Magisk bakes it into the compiled policy image; the `allow` rules do not,
-because Magisk's `--apply FILE` parser silently drops `allow` rules whose target type is not
-present in the baseline compiled policy (the custom type is added as a live patch, then
-erased, so the target is unknown when Magisk tries to compile the rule).
-
-Evidence:
-- `service.sh` log showed `magiskpolicy --live "allow ..."` returning exit 0 (success)
-- AVC denials persisted regardless — denials confirmed at 38–60 seconds post-boot
-- Manual `adb shell su -c 'magiskpolicy --live ...'` applied AFTER the policy reload point
-  worked correctly (pages flashed in that session)
-- `chcon u:object_r:epd_waveform_node:s0` succeeded (type in compiled policy, `associate`
-  rule applied), but KOReader's writes were still denied by the unpatched `allow` rules
-
-**2. Borrowing an unused platform type (`sysfs_vibrator`)**
-
-The GL4+ has no vibrator hardware, so `sysfs_vibrator` has zero labeled nodes on the device.
-Confirmed by scanning all sysfs nodes on the live device:
-
-| Type | Labeled nodes |
-|---|---|
-| `sysfs_vibrator` | 0 — no vibrator hardware |
-| `sysfs_nfc_power_writable` | 0 — no NFC hardware |
-| `sysfs_uio` | 0 — no UIO devices |
-| `sysfs_zram` | 74 — in active use |
-| `sysfs_zram_uevent` | 1 — in active use |
-| `sysfs_debugfs_swsync` | 1 — in active use |
-| `sysfs_cma_readable` | 1 — in active use |
-
-`chcon u:object_r:sysfs_vibrator:s0` succeeded — the kernel recognizes the type and the
-node was correctly relabeled (confirmed: `tcontext=u:object_r:sysfs_vibrator:s0` in AVC
-denials after reboot). Unlike the custom type approach, `sysfs_vibrator` is already in the
-baseline compiled policy, so `allow` rules for it were expected to survive the policy reload.
-
-In practice they did not. The correct individual-line syntax was used:
-
-```
-allow untrusted_app sysfs_vibrator file getattr
-allow untrusted_app sysfs_vibrator file open
-allow untrusted_app sysfs_vibrator file write
-```
-
-AVC denials persisted after reboot with `{ write }` denied — same result as the custom type
-approach. Magisk's policy patcher on this device version can compile allow rules into the
-persistent policy only when the target is the bare `sysfs` type. Rules for `sysfs_vibrator`
-and custom types are applied as live kernel patches that are erased by Android's post-`/data`
-policy reload, regardless of whether the target type exists in the baseline compiled policy.
-
-Root cause is not fully explained — `sysfs` and `sysfs_vibrator` are both existing types but
-only `sysfs` rules persist. Likely related to Magisk 24.2's binary policy patcher having
-special handling or a known path for the `sysfs` type that it lacks for subtypes.
-
-**3. `sysfs_leds` (1 labeled node — lowest-impact active type)**
-
-After a full scan of sysfs subtype node counts on the live device, `sysfs_leds` was the
-most promising candidate: only 1 labeled node (a frontlight/LED brightness node), low
-security impact if made writable (apps can already control LEDs via Android APIs), and
-confirmed existing `untrusted_app` read access in the base policy.
-
-The AVC denial confirmed that `getattr` and `open` were already granted (`{ write }` was the
-only denial) — this is the "extending an existing rule" scenario that was hypothesized to
-work. It did not:
-
-```
-avc: denied { write } for name="force_update_mode"
   scontext=u:r:untrusted_app:s0  tcontext=u:object_r:sysfs_leds:s0  permissive=0
+avc: denied { open }    ...
+avc: denied { write }   ...
 ```
-
-The `allow untrusted_app sysfs_leds file write` rule did not survive the policy reload,
-identical to `sysfs_vibrator`.
-
-**Revised conclusion (June 2026, post-investigation):** The earlier conclusion that
-`magiskpolicy --live` silently drops allow rules for sysfs subtypes was INCORRECT. Direct
-testing confirmed that `magiskpolicy --live "allow untrusted_app sysfs_leds file write"`
-DOES add the rule to the live kernel policy — `sesearch` confirms the rule is present
-immediately after the call. The running policy also does not reload spontaneously during
-normal operation (60-second MD5 poll on `/sys/fs/selinux/policy` showed no changes).
-
-The actual root cause is a **label mismatch on reboot**:
-
-1. The genfscon rule `genfscon sysfs /class/leds → sysfs_leds` exists in the policy but
-   is effectively dead code on this device — all entries under `/sys/class/leds/` are
-   symlinks whose labels resolve to the target node's label, which falls under the
-   fallback `genfscon sysfs / → sysfs` rule. Confirmed: `ls -Z /sys/class/leds/on_charge`
-   shows `u:object_r:sysfs:s0`, not `sysfs_leds`.
-2. `force_update_mode` is at `/devices/virtual/disp/disp/waveform/` — not covered by any
-   specific genfscon rule. After every reboot it gets `u:object_r:sysfs:s0` (the fallback).
-3. `magiskpolicy --live "allow untrusted_app sysfs_leds file write"` adds a rule for the
-   `sysfs_leds` type. But since the file has `sysfs` label, the rule is irrelevant.
-4. The AVC denials showing `tcontext=u:object_r:sysfs_leds:s0` in earlier tests came from
-   sessions where a manual `chcon` was still in effect (device not rebooted since the chcon).
-
-**The working targeted solution (untested at boot, proven interactively):**
-
-service.sh must do both — apply the allow rules AND relabel the file:
-
-```sh
-# After sys.boot_completed=1 (post-policy-reload):
-magiskpolicy --live "allow untrusted_app sysfs_leds file getattr"
-magiskpolicy --live "allow untrusted_app sysfs_leds file open"
-magiskpolicy --live "allow untrusted_app sysfs_leds file write"
-chcon u:object_r:sysfs_leds:s0 /sys/devices/virtual/disp/disp/waveform/force_update_mode
-```
-
-Confirmed working interactively: after applying all three rules and the chcon, a non-root
-shell process successfully wrote to `force_update_mode`. The broad `sysfs` rule in the
-current production module avoids needing the `chcon` entirely, which is why it works.
-
-### Conclusion
-
-The production module now uses a targeted `sysfs_leds` rule rather than the broad `sysfs`
-rule. The security surface is limited to one type (`sysfs_leds`), which on this device has
-only one labeled node (`force_update_mode` after our `chcon`). Any installed app can write
-that node, but cannot write CPU governor, thermal, battery, or other sysfs nodes via this
-rule — unlike the broad `sysfs` rule which covered all unlabeled sysfs nodes.
-
-The `mlstrustedobject` attribute added to `sysfs_leds` is a recognized Android attribute
-for sysfs objects that need to be writable by untrusted processes (the LED brightness node
-is the canonical example). Adding it to `sysfs_leds` is consistent with its intent.
 
 ---
 
-## Dead end: `/dev/disp` ioctl (no EPD waveform control)
+## Dead end: `/dev/disp` ioctl
 
-`/dev/disp` is world-accessible (`crw-rw-rw-`, `system:system`) and was considered as a
-no-root alternative to sysfs. Investigation via
-[linux-sunxi.org/Sunxi_disp_driver_interface](https://linux-sunxi.org/Sunxi_disp_driver_interface)
-ruled it out:
-
-1. **No EPD ioctls.** The stable Sunxi disp ioctl list covers LCD, HDMI, layer, and video
-   commands only. EPD waveform selection (`force_update_mode`, GC16/GU16) is a B&N/AllWinner
-   extension that lives exclusively in the sysfs waveform nodes — `/dev/disp` has no concept
-   of waveform mode.
-
-2. **Explicitly deprecated upstream.** The linux-sunxi project states:
-   > "The /dev/disp interface will break and will in the end vanish completely!"
-   Building on it would be fragile regardless.
-
-**Conclusion:** `/dev/disp` is a dead end for waveform control. Without the Magisk
-`chmod 666`, `force_update_mode` is `rw-rw----` (root:root) and all sysfs writes fail
-silently. The only remaining no-root candidate is the `com.nook.action.full_refresh`
-broadcast intent — see "What was tried" section 4.
+`/dev/disp` is world-accessible (`crw-rw-rw-`) but has no EPD ioctls — it covers LCD/HDMI/
+layer/video commands only. EPD waveform selection lives exclusively in the sysfs waveform
+nodes. Also explicitly deprecated upstream by linux-sunxi.
 
 ---
 
-## Sysfs map for the AllWinner EPD driver
+## Sysfs map
 
-Full list of nodes in `/sys/devices/virtual/disp/disp/waveform/`:
+Nodes in `/sys/devices/virtual/disp/disp/waveform/`:
 
 | Node | Permissions | Notes |
 |---|---|---|
@@ -654,94 +311,36 @@ Full list of nodes in `/sys/devices/virtual/disp/disp/waveform/`:
 
 ### Confirm GC16 is active
 
-After installing the Magisk module and our KOReader build:
-
-1. Open KOReader → swipe from top → Screen → E-ink settings → Full refresh rate → Every page
+1. KOReader → swipe from top → Screen → E-ink settings → Full refresh rate → Every page
 2. Turn pages
 3. Check dmesg:
-
 ```sh
 adb shell dmesg | grep "order=" | tail -10
 # Expected: mode=0x200004 (GC16)
 # If still:  mode=0x200084 (GU16), the sysfs write isn't reaching the driver
 ```
-
-4. Check logcat for the controller:
+4. Check logcat:
 ```sh
 adb logcat -d | grep "Emperor EPD"
 # Expected: Emperor EPD: force_update_mode=4 (waveform=0x80000004)
 # If:        Emperor EPD: sysfs write failed ...  →  chmod 666 not applied
 ```
 
-### Confirm GC16 is NOT active when "Never" is selected
+### Confirm GC16 disabled with "Never"
 
-With "Never" set, `setEpdMode` is never called, so `force_update_mode` stays at 0.
-dmesg should show `mode=0x200084` (GU16, no flash) for all page turns.
+`force_update_mode` stays at 0. dmesg should show `mode=0x200084` (GU16) for all page turns.
 
-### Check waveform file is accessible
+### Check node accessibility
 
 ```sh
 adb shell ls -la /sys/devices/virtual/disp/disp/waveform/force_update_mode
-# After Magisk boot script: should show -rw-rw-rw- (666)
-# Before / without module:  -rw-rw---- (root:root only)
+# After Magisk: -rw-rw-rw- (666)
+# Without:      -rw-rw---- (root:root only)
 ```
 
 ---
 
 ## EPD control comparison
-
-### Before our changes — stock KOReader on GL4+
-
-KOReader had no device entry for bnrv1300. It fell through to a generic Android path with
-no EPD controller. It rendered via `ANativeWindow` (direct buffer writes), which flows to
-`sunxihwc_eink` and then to the EPD driver. With no controller providing any input, the
-driver used its **GU16 default for every refresh** — including KOReader's "full refresh"
-events. No flash, some ghosting. This is what prompted
-[koreader/koreader#14574](https://github.com/koreader/koreader/issues/14574).
-
-### Our changes, without root
-
-We added bnrv1300 detection and `NookEmperorEPDController`. On every full refresh,
-`setEpdMode` tries to write `4` (GC16) to the sysfs node. Without the Magisk module, the
-node is `rw-rw----` (root:root), so the write gets `IOException`, is caught silently, and
-nothing changes. The driver still uses GU16 for everything.
-
-The difference from before is structural only: the device is properly detected, the
-controller is wired in, and the full-refresh path attempts waveform control. **The visual
-result is identical to pre-change — GU16 for all refreshes.**
-
-### Our changes, with root (Magisk `epd_gc16`)
-
-The Magisk boot script `chmod 666`s the sysfs node. `setEpdMode` now succeeds: the
-controller writes `4` before each full refresh, the driver picks up the forced mode, and the
-commit goes out as **GC16** — the full 16-grey flash. After resume, the controller writes
-`0` to reset to GU16 so partial refreshes continue using the driver's own selection.
-
-### The Nook e-reader app
-
-The Nook app takes a completely different architectural path. Because it is a system app
-with platform privileges, it renders through the Android View draw cycle and calls
-`View.invalidate(EINK_NO_MERGE | EINK_GC16_MODE)`. `sunxihwc_eink` sees the waveform hint
-attached to each frame as it is committed — no root, no sysfs, no special permissions
-beyond being a system app:
-
-```
-Nook app  →  View.invalidate(0x80000004)
-                 ↓
-             sunxihwc_eink HWC  ← hint arrives here (View draw cycle)
-                 ↓
-             EPD driver → GC16 commit
-```
-
-It can also call `Surface.einkChangeQuickUpdateMode(0x80000004)` and set
-`SystemProperties` directly — both require platform privileges. The
-`com.nook.action.full_refresh` broadcast intent wraps this same call so any app can
-request a full GC16 refresh by letting the partner service exercise its own privileges.
-
-KOReader's `ANativeWindow` path bypasses the View draw cycle entirely, so `sunxihwc_eink`
-never sees a waveform hint for KOReader's frames regardless of what the EPD controller calls.
-
-### Side-by-side
 
 | Scenario | Waveform | Mechanism | Root? |
 |---|---|---|---|
@@ -749,38 +348,4 @@ never sees a waveform hint for KOReader's frames regardless of what the EPD cont
 | Our changes, no root | GU16 always | sysfs write fails silently | No |
 | Our changes, with root | GC16 for full refreshes | Magisk chmod + sysfs write | Yes |
 | Nook e-reader app | GC16/GU16 per-refresh | View hints through HWC pipeline | No (system app) |
-| Broadcast intent (untested) | GC16 for full refresh | Partner service uses system privileges | No |
-
----
-
-## History of investigation
-
-1. Started from [koreader/koreader#14574](https://github.com/koreader/koreader/issues/14574) — no EPD driver existed for bnrv1300
-2. Decompiled `com.nook.partner.EpdDisplayControllerImpl` to understand B&N's approach
-3. Implemented `Surface.einkChangeQuickUpdateMode` → fires but no kernel effect
-4. Switched to `View.invalidate(4)` → fires but no kernel effect (ANativeWindow bypass)
-5. Discovered AllWinner sysfs at `/sys/devices/virtual/disp/disp/waveform/`
-6. Confirmed `force_update_mode=4` changes kernel mode to `0x200004` (GC16) via dmesg
-7. Added Magisk module to chmod 666 the node on boot
-8. KOReader now writes directly to sysfs in `setEpdMode`
-9. Discovered SELinux blocks sysfs writes from `untrusted_app` even with `chmod 666` —
-   investigated targeted approaches (custom type `epd_waveform_node`, borrowed type
-   `sysfs_vibrator`); both failed because Android init reloads the compiled SELinux policy
-   during boot (post `/data` decrypt), erasing all runtime `magiskpolicy --live` patches
-   applied by `service.sh`; Magisk's `--apply FILE` parser compiles `allow` rules for
-   EXISTING types into the persistent policy, but drops `allow` rules whose target type is
-   not in the baseline compiled policy (custom types are erased by the reload before the rule
-   is compiled); individual `allow` lines required (curly-brace multi-permission syntax
-   silently dropped); final solution: broad `allow untrusted_app sysfs file getattr/open/write`
-   applied as three separate lines in `sepolicy.rule`, which Magisk bakes into the compiled
-   policy and survives the reload; confirmed zero AVC denials and GC16 flashing on clean boot
-10. Discovered `"full-only"` mode causes spurious GC16 flashing — `force_update_mode` is
-    persistent kernel state; after a full refresh sets it to `4`, every subsequent display
-    commit (clock, UI, partial) also uses GC16 until explicitly reset; fixed by switching
-    to `"all"` mode so every partial/UI/fast refresh resets to `0`; confirmed: full refresh
-    flashes on every page, every-6-pages works, never suppresses all flashing
-10. Reviewed [koreader/koreader#11110](https://github.com/koreader/koreader/issues/11110) — prior work on NGL4/NGL4e (bnrv1000/1100):
-   confirmed `View.invalidate` works via view hierarchy but not ANativeWindow; identified
-   `sunxihwc_eink` as the HWC layer; found `com.nook.action.full_refresh` broadcast intent
-   as a potential no-root path; confirmed full waveform constant set matches `sunxi_kobo_h.lua`;
-   bnrv1300 was explicitly unconfirmed in that issue — our sysfs work is the first confirmed implementation
+| Broadcast intent | GC16 (always wrong frame) | Partner service; flashes old page | No |
