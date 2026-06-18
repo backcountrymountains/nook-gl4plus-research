@@ -527,6 +527,21 @@ rules are applied as live patches that are erased by Android's post-`/data` poli
 The mechanism that makes `sysfs` special is not documented and not reproducible with any
 other type. The broad `sysfs` rule is the only working solution on this Magisk version.
 
+**Post-reload re-application also fails (June 2026):** A background fork in `service.sh`
+that waits for `sys.boot_completed=1` (guaranteed to fire after the policy reload) and then
+calls `magiskpolicy --live "allow untrusted_app sysfs_leds file write"` was tested. The
+call returns exit 0 with no errors, but AVC `{ write }` denials for `untrusted_app` on
+`sysfs_leds` continue indefinitely — confirmed via dmesg up to 468 seconds after boot with
+`boot_completed=1` already set. The rule has no effect. Separately confirmed that `adb
+shell su -c "magiskpolicy --live '...'"` produces "Syntax error in 'allow'" due to ADB
+shell quoting mangling the argument, but when the same command runs from within a shell
+script on the device it exits 0 and still has no effect on the policy.
+
+**Root cause:** Magisk 24.2's policy patcher silently drops `allow` rules for sysfs
+subtypes both at compile time (the `sepolicy.rule` path that patches the boot image) and at
+runtime (the `--live` path that patches the running kernel). The constraint is in the patcher
+itself, not in timing. No workaround exists short of modifying Magisk.
+
 ### Conclusion
 
 The broad `sysfs` rule is the only working solution with Magisk 24.2 on this device. The
