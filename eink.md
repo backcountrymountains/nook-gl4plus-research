@@ -459,11 +459,27 @@ Confirmed by scanning all sysfs nodes on the live device:
 | `sysfs_cma_readable` | 1 — in active use |
 
 `chcon u:object_r:sysfs_vibrator:s0` succeeded — the kernel recognizes the type and the
-node was correctly relabeled. Unlike the custom type approach, `sysfs_vibrator` is already
-in the baseline compiled policy, so `allow` rules for it should survive the policy reload.
-However, in practice the `allow` rules still did not apply — Magisk's `--apply FILE` parser
-silently dropped them. Root cause is not fully confirmed; possibly the same reload issue, or
-a parser limitation specific to `sysfs_vibrator`.
+node was correctly relabeled (confirmed: `tcontext=u:object_r:sysfs_vibrator:s0` in AVC
+denials after reboot). Unlike the custom type approach, `sysfs_vibrator` is already in the
+baseline compiled policy, so `allow` rules for it were expected to survive the policy reload.
+
+In practice they did not. The correct individual-line syntax was used:
+
+```
+allow untrusted_app sysfs_vibrator file getattr
+allow untrusted_app sysfs_vibrator file open
+allow untrusted_app sysfs_vibrator file write
+```
+
+AVC denials persisted after reboot with `{ write }` denied — same result as the custom type
+approach. Magisk's policy patcher on this device version can compile allow rules into the
+persistent policy only when the target is the bare `sysfs` type. Rules for `sysfs_vibrator`
+and custom types are applied as live kernel patches that are erased by Android's post-`/data`
+policy reload, regardless of whether the target type exists in the baseline compiled policy.
+
+Root cause is not fully explained — `sysfs` and `sysfs_vibrator` are both existing types but
+only `sysfs` rules persist. Likely related to Magisk 24.2's binary policy patcher having
+special handling or a known path for the `sysfs` type that it lacks for subtypes.
 
 ### Conclusion
 
