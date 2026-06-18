@@ -172,9 +172,29 @@ context.sendBroadcast(
    being alive is a harder argument to make to upstream maintainers — even though sysfs
    requires root and the broadcast does not.
 
-**Bottom line:** worth one ADB test to confirm bnrv1300 support, but unlikely to work
-correctly in KOReader's rendering path without solving the timing problem — and the async
-dispatch latency may make a clean solution impossible.
+**Test results (bnrv1300, June 2026):**
+
+ADB broadcast confirmed working on bnrv1300 — screen flashed GC16 (`mode=0x80200004`
+in dmesg). Service cold-start latency: ~7s. Warm latency: ~160ms.
+
+Integrated into `NookEmperorEPDController.setEpdMode` and tested with "full refresh
+every page." Result: GC16 always flashed the OLD page before the new page appeared.
+
+Root cause: `einkChangeQuickUpdateMode` forces GC16 of what the EPD hardware is
+**currently displaying**, not the next queued buffer. In KOReader's rendering pipeline
+(`framebuffer_android.lua`), `setEpdMode` is called immediately after
+`ANativeWindow_unlockAndPost` — but the EPD hardware is still mid-GU16 waveform on the
+previous page (~260ms animation). The broadcast fires ~160ms later onto the in-progress
+old-page waveform.
+
+This is fundamentally different from the sysfs approach: `force_update_mode=4` is a
+driver flag read when the next queued buffer is processed, so it correctly arms GC16 for
+the *incoming* page. No timing fix exists for the broadcast path — even a 400ms delay
+produces a double-flash (GU16 then GC16 on the same page) at 800ms+ total latency.
+
+**Bottom line:** the broadcast works as a standalone "clean the screen" command but is
+architecturally incompatible with per-page-turn GC16 in KOReader. The sysfs approach
+(Magisk module) is the only correct solution for this hardware.
 
 ---
 
