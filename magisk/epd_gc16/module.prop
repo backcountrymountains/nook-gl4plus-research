@@ -1,6 +1,6 @@
 id=epd_gc16
 name=KOReader EPD GC16 Access
-version=v1
-versionCode=1
+version=v9
+versionCode=9
 author=local
 description=Grants world-write access to the AllWinner EPD force_update_mode sysfs node so KOReader can drive GC16 waveform refreshes without root at runtime.

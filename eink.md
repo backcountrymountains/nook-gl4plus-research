@@ -197,8 +197,13 @@ avc: denied { write } for name="force_update_mode"
 
 **`/data/adb/modules/epd_gc16/sepolicy.rule`**:
 ```
-allow untrusted_app sysfs file { open read write getattr }
+allow untrusted_app sysfs file getattr
+allow untrusted_app sysfs file open
+allow untrusted_app sysfs file write
 ```
+
+Note: Magisk 24.2's `sepolicy.rule` parser requires one permission per line. Curly-brace
+syntax (`{ open write }`) is not parsed — the rule is silently dropped.
 
 **`/data/adb/modules/epd_gc16/service.sh`**:
 ```sh
@@ -215,19 +220,8 @@ fi
 processes to open, read, write, and stat any sysfs node carrying the default `sysfs` label,
 not just the EPD waveform node.
 
-**Two targeted approaches were attempted and failed:**
-
-1. **Custom type (`epd_waveform_node`)**: Magisk 24.2 `sepolicy.rule` does not support full
-   `type` declarations with filesystem attributes. The `chcon` fell back to `unlabeled:s0`
-   and the sysfs `associate` permission check rejected it.
-
-2. **Borrowed type (`sysfs_vibrator`)**: The GL4+ has no vibrator hardware, so
-   `sysfs_vibrator` has zero labeled nodes on the device — an ideal candidate. `chcon
-   u:object_r:sysfs_vibrator:s0` succeeded (the kernel recognizes the type), but Magisk's
-   policy patcher could not apply `allow untrusted_app sysfs_vibrator file { ... }` at
-   either boot time or via `--live`. AVC denials persisted after both methods returned exit 0.
-   Root cause: Magisk 24.2 cannot resolve `sysfs_vibrator` in the compiled binary policy
-   when applying allow rules, even though the kernel uses the type correctly for labeling.
+**Two targeted approaches were attempted and failed** — see the detailed analysis in the
+"Targeted approaches" subsection below.
 
 The vendor SELinux policy files were pulled and analyzed. Unused sysfs types confirmed on
 device (zero labeled nodes): `sysfs_vibrator`, `sysfs_nfc_power_writable`, `sysfs_uio`.
@@ -379,19 +373,29 @@ independent layers:
    `untrusted_app` from writing `sysfs`-labeled files. `chmod 666` alone is not enough;
    SELinux enforces on top of DAC regardless of file mode bits.
 
-The AVC denial confirmed on device before the fix:
+AVC denials confirmed on device (each denied in sequence; each blocks before the next):
 ```
+avc: denied { getattr } for name="force_update_mode"
+  scontext=u:r:untrusted_app:s0  tcontext=u:object_r:sysfs:s0  permissive=0
+avc: denied { open } for name="force_update_mode"
+  scontext=u:r:untrusted_app:s0  tcontext=u:object_r:sysfs:s0  permissive=0
 avc: denied { write } for name="force_update_mode"
   scontext=u:r:untrusted_app:s0  tcontext=u:object_r:sysfs:s0  permissive=0
 ```
 
+Java's `File.writeText()` calls `stat()` first (`getattr`), then `open(O_WRONLY)` (`open` +
+`write`). All three must be allowed. The `read` permission is not needed — KOReader only
+writes to the node, never reads from it.
+
 ### The working rule and why it's broad
 
 ```
-allow untrusted_app sysfs file { open read write getattr }
+allow untrusted_app sysfs file getattr
+allow untrusted_app sysfs file open
+allow untrusted_app sysfs file write
 ```
 
-This grants every installed app the ability to open, read, write, and stat **any** sysfs
+This grants every installed app the ability to stat, open for write, and write **any** sysfs
 node carrying the default `sysfs` label — not just the EPD waveform node. On Android 8.1
 that includes CPU frequency/governor nodes, thermal throttling thresholds, battery and
 charging control nodes, and other hardware registers that haven't been given a more specific
@@ -405,20 +409,41 @@ sysfs access is not part of the Android permission model.
 The ideal fix is to label only `force_update_mode` with a dedicated type and allow only
 that type. Two approaches were tried:
 
-**1. Custom type (`epd_waveform_node`)**
+**1. Custom type (`epd_waveform_node`) — "dual-pass" approach**
+
+The idea: declare a custom type, label only the EPD node with it, write targeted `allow`
+rules for that type only. A bare `type` declaration (no attributes) works in Magisk 24.2's
+`sepolicy.rule` parser — the type is successfully added to the compiled policy. The
+`associate` permission for the `sysfs` filesystem can also be applied with correct syntax
+(no curly braces):
 
 ```
-# sepolicy.rule
-type epd_waveform_node fs_type sysfs_type
-allow untrusted_app epd_waveform_node file { open read write getattr }
+# sepolicy.rule — type declaration survives; allow rules do not (see below)
+type epd_waveform_node
+allow epd_waveform_node sysfs filesystem associate
+allow untrusted_app epd_waveform_node file open
+allow untrusted_app epd_waveform_node file write
+allow untrusted_app epd_waveform_node file getattr
 ```
 
-Magisk 24.2 `sepolicy.rule` does not support full `type` declarations with filesystem
-attributes. `chcon u:object_r:epd_waveform_node:s0` failed — the kernel reported
-`scontext=u:object_r:unlabeled:s0` in the AVC denial, meaning the type wasn't registered.
-The sysfs filesystem `associate` permission check then rejected the relabeling.
+The fundamental failure: **Android init reloads the SELinux policy from compiled images
+during boot (around the time `/data` is decrypted), after Magisk's `service.sh` has run.**
+Rules applied via `magiskpolicy --live` — whether from `service.sh` or interactively via
+`adb shell su` — are live kernel patches that are erased by this reload. The `type` declaration
+survives because Magisk bakes it into the compiled policy image; the `allow` rules do not,
+because Magisk's `--apply FILE` parser silently drops `allow` rules whose target type is not
+present in the baseline compiled policy (the custom type is added as a live patch, then
+erased, so the target is unknown when Magisk tries to compile the rule).
 
-**2. Borrowing `sysfs_vibrator`**
+Evidence:
+- `service.sh` log showed `magiskpolicy --live "allow ..."` returning exit 0 (success)
+- AVC denials persisted regardless — denials confirmed at 38–60 seconds post-boot
+- Manual `adb shell su -c 'magiskpolicy --live ...'` applied AFTER the policy reload point
+  worked correctly (pages flashed in that session)
+- `chcon u:object_r:epd_waveform_node:s0` succeeded (type in compiled policy, `associate`
+  rule applied), but KOReader's writes were still denied by the unpatched `allow` rules
+
+**2. Borrowing an unused platform type (`sysfs_vibrator`)**
 
 The GL4+ has no vibrator hardware, so `sysfs_vibrator` has zero labeled nodes on the device.
 Confirmed by scanning all sysfs nodes on the live device:
@@ -434,11 +459,11 @@ Confirmed by scanning all sysfs nodes on the live device:
 | `sysfs_cma_readable` | 1 — in active use |
 
 `chcon u:object_r:sysfs_vibrator:s0` succeeded — the kernel recognizes the type and the
-node was correctly relabeled. However, Magisk 24.2 could not apply
-`allow untrusted_app sysfs_vibrator file { ... }` at either boot time (via `sepolicy.rule`)
-or at runtime (via `magiskpolicy --live`). Both returned exit 0 but AVC denials persisted.
-Root cause: Magisk's policy patcher cannot resolve `sysfs_vibrator` as an allow-rule target
-in the compiled binary policy, even though the kernel uses the type correctly for labeling.
+node was correctly relabeled. Unlike the custom type approach, `sysfs_vibrator` is already
+in the baseline compiled policy, so `allow` rules for it should survive the policy reload.
+However, in practice the `allow` rules still did not apply — Magisk's `--apply FILE` parser
+silently dropped them. Root cause is not fully confirmed; possibly the same reload issue, or
+a parser limitation specific to `sysfs_vibrator`.
 
 ### Conclusion
 
@@ -611,8 +636,16 @@ never sees a waveform hint for KOReader's frames regardless of what the EPD cont
 7. Added Magisk module to chmod 666 the node on boot
 8. KOReader now writes directly to sysfs in `setEpdMode`
 9. Discovered SELinux blocks sysfs writes from `untrusted_app` even with `chmod 666` —
-   added `sepolicy.rule` to Magisk module; confirmed GC16 (`mode=0x200004`) in dmesg on
-   live device with page-turn test
+   investigated targeted approaches (custom type `epd_waveform_node`, borrowed type
+   `sysfs_vibrator`); both failed because Android init reloads the compiled SELinux policy
+   during boot (post `/data` decrypt), erasing all runtime `magiskpolicy --live` patches
+   applied by `service.sh`; Magisk's `--apply FILE` parser compiles `allow` rules for
+   EXISTING types into the persistent policy, but drops `allow` rules whose target type is
+   not in the baseline compiled policy (custom types are erased by the reload before the rule
+   is compiled); individual `allow` lines required (curly-brace multi-permission syntax
+   silently dropped); final solution: broad `allow untrusted_app sysfs file getattr/open/write`
+   applied as three separate lines in `sepolicy.rule`, which Magisk bakes into the compiled
+   policy and survives the reload; confirmed zero AVC denials and GC16 flashing on clean boot
 10. Discovered `"full-only"` mode causes spurious GC16 flashing — `force_update_mode` is
     persistent kernel state; after a full refresh sets it to `4`, every subsequent display
     commit (clock, UI, partial) also uses GC16 until explicitly reset; fixed by switching
