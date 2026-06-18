@@ -116,7 +116,9 @@ locks the screen) and reads sleep artwork from `/system/media/SleepImageNook/`.
 `lockscreen_status` Settings.System key that `isLockScreenLocked()` reads is purely
 informational and is not checked by `PowerManagerService` before showing the overlay.
 
-Disabling the slide-to-unlock requires root:
+Disabling the slide-to-unlock requires root, but is **not recommended**: without
+it, accidental button presses during transport can wake the device and drain the
+battery unnoticed. The overlay serves as a useful accidental-input guard.
 
 ```sh
 # Persistent suppression via Magisk module service.sh:

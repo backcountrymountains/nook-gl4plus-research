@@ -66,11 +66,15 @@ Scale is 0–100. The Nook's own Settings app uses the same system setting and t
 #### WRITE_SETTINGS permission
 
 `Settings.System.putInt` requires the "Modify system settings" special app permission.
-Grant it once via ADB — no root needed:
+Grant it once after each fresh install — no root needed.
 
+**Via ADB:**
 ```sh
 adb shell appops set org.koreader.launcher WRITE_SETTINGS allow
 ```
+
+**Via the system UI:** long-press the KOReader icon → **App Info** → **Advanced** →
+**Modify system settings** → toggle **Allow**.
 
 Without this, every brightness write throws a `SecurityException` logged by KRP. The
 permission survives app updates but is cleared on full reinstall or data wipe.
@@ -183,6 +187,50 @@ the hardware ranges exactly (no rescaling in the Lua layer).
 
 ---
 
+## `com.nook.partner` package requirements
+
+Warmth depends on `GlowLightService`, which lives inside the `com.nook.partner` system
+app. Two conditions must hold:
+
+1. The `com.nook.partner` **package** must not be disabled wholesale.
+2. `com.nook.partner.service.GlowLightService` must not be individually disabled.
+
+`GlowLightService` is **independent** of `StatusBarService` — disabling `StatusBarService`
+(to suppress temperature warning dialogs or the B&N status overlay) does not affect warmth.
+
+### If you previously disabled `com.nook.partner`
+
+Many GL4 Plus users disable `com.nook.partner` to remove the B&N launcher and block OTA
+updates. This also kills `GlowLightService`. To restore warmth without reinstating the
+B&N ecosystem, re-enable the package and then selectively re-disable the components you
+don't want:
+
+```sh
+# Step 1 — re-enable the package so GlowLightService can start
+adb shell pm enable com.nook.partner
+
+# Step 2 — re-disable the components you had disabled before
+# B&N launcher
+adb shell su -c 'pm disable com.nook.partner/.FacadeLauncherActivity'
+adb shell su -c 'pm disable com.nook.partner/.OobeLauncherActivity'
+# OTA update system
+adb shell su -c 'pm disable com.nook.partner/.otamanager.OtaIntentService'
+adb shell su -c 'pm disable com.nook.partner/.otamanager.SideloadInstaller'
+adb shell su -c 'pm disable com.nook.partner/.oobe.OobeOtaActivity'
+# B&N status bar / temperature warnings (optional — see temperature-management.md)
+adb shell su -c 'pm disable com.nook.partner/.statusbar.StatusBarService'
+```
+
+Do NOT disable `com.nook.partner.service.GlowLightService` itself.
+
+Verify the result:
+```sh
+adb shell dumpsys package com.nook.partner | grep -A 20 disabledComponents
+# GlowLightService should NOT appear in this list
+```
+
+---
+
 ## Troubleshooting
 
 ### Brightness slider does nothing
@@ -204,7 +252,9 @@ adb logcat -d | grep -i "securityexception"
 ### Warmth slider does nothing / warmth resets after resume
 
 1. Check `GlowLightService` is running: `adb shell dumpsys activity services com.nook.partner`
-2. Verify B&N's nookPartner app is installed and not disabled
+2. If nothing is listed, `com.nook.partner` may be disabled — see
+   [`com.nook.partner` package requirements](#comnookpartner-package-requirements) above
+   for the re-enable / selective re-disable procedure
 3. After resume, check KOReader's warmth restore logic fires — look for `setScreenWarmth`
    in logcat
 

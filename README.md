@@ -23,6 +23,8 @@ Device identifiers:
 | [power-management.md](power-management.md) | Deep sleep via `power_enhance_enable`, `PowerManagerEx`, nopowen patch, slide-to-unlock |
 | [ota-updates.md](ota-updates.md) | OTA firmware update mechanism, server URLs, and how to permanently block all update paths |
 | [eink-and-frontlight.md](eink-and-frontlight.md) | E-ink refresh via `View.invalidate(int)` hook; brightness via `Settings.System`; warmth via `GlowLightService` |
+| [hwc-hal-reverse-engineering.md](hwc-hal-reverse-engineering.md) | Full RE of `hwcomposer.virgo.so`, `libgui.so`, `libsurfaceflinger.so`, and framework VDEX — call chain from `SurfaceControl.setRefreshMode` down to `layer->refreshMode` at HWC struct offset 0x24 |
+| [handoff-surfacecontrol-path.md](handoff-surfacecontrol-path.md) | Test procedure and decision tree for the new no-root SurfaceControl waveform path (GLR16 capable) |
 
 ---
 
@@ -95,3 +97,12 @@ Kernel and framework behaviour was verified live over ADB with root access (Magi
   sending an intent to `com.nook.partner/.service.GlowLightService`, which holds
   `DEVICE_POWER` and drives the LM3630A chip — no root required.
   See [eink-and-frontlight.md](eink-and-frontlight.md).
+
+- **Unprivileged waveform control** is available via `android.view.SurfaceControl.setRefreshMode(int)`,
+  a B&N-added `@hide` method that routes through SurfaceFlinger → `hwcomposer.virgo.so`
+  → `layer->refreshMode` (Layer struct offset 0x24) — no permission gate found at any layer.
+  This path supports **GLR16 (REAGL)** via HWC's full `/dev/disp` ioctl context, unlike
+  the sysfs `force_update_mode` node which silently ignores `0x40`. Whether the path is
+  reachable on this firmware depends on whether B&N backported `ViewRootImpl.mSurfaceControl`
+  from AOSP Android 10 — determined at runtime by the log line in KOReader.
+  See [hwc-hal-reverse-engineering.md](hwc-hal-reverse-engineering.md).

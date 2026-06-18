@@ -25,6 +25,12 @@ TEST_VALUES: list[tuple[int, int]] = [
     (8, 80),   # warmth=8  → intent value 80
 ]
 SETTLE_S = 1.5
+BRIGHTNESS_DWELL_S = 3.0  # pause at 100% before testing so the change is visible
+
+
+def _set_brightness(value: int) -> None:
+    """Set screen brightness (0-255)."""
+    adb.shell(f"settings put system screen_brightness {value}")
 
 
 def _send_warmth(intent_value: int) -> str:
@@ -52,6 +58,10 @@ class WarmthControlTest(BaseTest):
         self._original_warmth = _read_warmth()
         log.info("original %s = %s", SETTINGS_KEY, self._original_warmth)
 
+        log.info("setting brightness to 100 (device max) so warmth changes are visible")
+        _set_brightness(100)
+        time.sleep(BRIGHTNESS_DWELL_S)
+
     def run(self) -> tuple[bool, str]:
         for warmth, intent_value in TEST_VALUES:
             log.info("sending warmth=%d (intent value %d)", warmth, intent_value)
@@ -74,6 +84,8 @@ class WarmthControlTest(BaseTest):
         return True, f"both warmth values ({[w for w, _ in TEST_VALUES]}) applied correctly"
 
     def teardown(self) -> None:
+        # Brightness is restored by DeviceSnapshot in BaseTest.execute().
+        # Warmth requires GlowLightService so we restore it explicitly here.
         if self._original_warmth is not None:
             restore_intent = self._original_warmth * 10
             log.info("restoring warmth to %d (intent %d)", self._original_warmth, restore_intent)
