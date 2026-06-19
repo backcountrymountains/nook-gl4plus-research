@@ -131,8 +131,8 @@ At ~1%/hour with no backlight, a full charge gives approximately **100 hours of
 reading** at 1 page/minute. The two pink bands on the left of the chart are brief
 USB reconnections (~19 min and ~6 min) where the plugin automatically paused.
 
-Full chart and plot script:
-[nook-gl4plus-deepsleep/analysis/](https://github.com/backcountrymountains/nook-gl4plus-deepsleep/tree/master/analysis)
+Raw log: [bdt_external.log](https://github.com/backcountrymountains/nook-gl4plus-deepsleep/blob/master/bdt_external.log) (TSV, 640 rows) ·
+Chart and plot script: [nook-gl4plus-deepsleep/analysis/](https://github.com/backcountrymountains/nook-gl4plus-deepsleep/tree/master/analysis)
 
 ---
 
