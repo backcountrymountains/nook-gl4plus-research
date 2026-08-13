@@ -262,8 +262,18 @@ setupCTM:0
 Jungwen-LightService- kk-1-brightness(color):10
 ```
 
-**On-device equivalent, no ADB:** open B&N's own glowlight settings and move the warmth
-slider once. That path calls `GlowLightUtils.setCTMMode()` and rewrites the same prefs.
+**There is no on-device equivalent via `com.example.ctm` ("Display Settings").** Tested
+2026-08-13: sliding its warmth control drove the hardware (`kk-1-brightness(color):3→2→1→0→9→10`)
+with **no `CTMService` line in logcat at all** — the app holds `DEVICE_POWER` and calls
+`LightsService` directly, bypassing `GlowLightService`'s intent API. `ctm_mode` is never
+written, so the value still dies at the next unlock (verified: 10 → 0 across one screen
+cycle). It changes the light, not the setting that survives unlock.
+
+The only UI that *would* repair the mode is `NightModeSettingsFragment` — but that lives in
+`bn.ereader`, which is disabled on any device set up to run KOReader as its reader.
+`QuickSettings` in nookPartner also calls `GlowLightUtils.setupCTMMode()`
+(`QuickSettings.java:615-618`, gated on `ro.bn.ctm`, `true` on this firmware), but it is
+reachable only from B&N's own status bar. **Untested.**
 
 **In KOReader:** `NookGL4plusController.assertManualCtmMode()` sends intent 1 once per
 process, immediately before the first warmth write (which supplies intent 2) — so simply

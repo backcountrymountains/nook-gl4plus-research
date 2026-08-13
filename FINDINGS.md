@@ -36,6 +36,24 @@ screen cycle. Step 1 alone leaves warmth at `DAY_LIGHT`/10 = **1** — `ManualMo
 when `manual_color_temperature` is unset. Automated in
 `NookGL4plusController.assertManualCtmMode()`.
 
+### Does the on-device "Display Settings" app repair CTM mode?    [NEGATIVE]
+No. `com.example.ctm` — the "Display Settings" entry on the launcher — holds `DEVICE_POWER`
+and drives `LightsService` **directly**, bypassing `GlowLightService`'s intent API. Tested
+2026-08-13 from a deliberately broken state: sliding warmth to maximum produced
+`kk-1-brightness(color):3→2→1→0→9→10` and **zero `CTMService` log lines**; `ctm_mode` was
+never written and warmth still went **10 → 0** across the next screen cycle. It changes the
+light, not the setting that survives unlock. `NightModeSettingsFragment` would write the
+mode but lives in `bn.ereader` (disabled on a KOReader device); nookPartner's `QuickSettings`
+also calls `setupCTMMode()` but is reachable only from B&N's status bar — **[OPEN]**, untested.
+
+### Does deleting `ctm_preference.xml` reproduce the cold-light symptom?    [SETTLED]
+Yes — this is the direct confirmation of the root cause. Deleting only that file and killing
+`com.nook.partner` (`am force-stop` does **not** work; it is persistent — `kill -9` the pid)
+makes warmth reset to `0` on the next screen cycle, exactly as observed after the 2026-08-02
+thermal shutdown. It also confirms the non-persistence claim: with the mode absent, KOReader's
+warmth intent left `color_temperature=100` in the rewritten prefs and no
+`manual_color_temperature`, matching the single-key file found in the wild.
+
 ### Is `screen_brightness_color_backup` the value CTM restores?    [NEGATIVE]
 No. Set it to `6`, cycled the screen, warmth still came back `0` (2026-08-13). The reset
 value is the `COLD_LIGHT` constant, not a backup key. Do not chase this setting again.
