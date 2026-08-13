@@ -135,7 +135,9 @@ override fun getWarmth(activity: Activity): Int {
 ## Warmth persistence
 
 The AllWinner driver resets the warm LED on every app start and resume — it does not
-persist the value. KOReader handles this in `powerd.lua` via `AndroidPowerD.init()`:
+persist the value. (The reset on *unlock* has a second, independent cause: see
+[Color Temperature Management](#color-temperature-management-ctm) below.) KOReader handles
+this in `powerd.lua` via `AndroidPowerD.init()`:
 
 ```lua
 local saved = G_reader_settings:readSetting("frontlight_warmth") or 0
@@ -146,6 +148,126 @@ end
 
 `setWarmthHW()` saves to `G_reader_settings` and flushes on every change, so the value
 survives app restarts without requiring system-level persistence.
+
+---
+
+## Color Temperature Management (CTM)
+
+`GlowLightService` also owns B&N's CTM layer, which **re-applies a warmth value on every
+`SCREEN_ON`** — after the framework has already restored `screen_brightness_color`. Whatever
+CTM decides therefore wins over anything KOReader set before the screen went off.
+
+`setupCTM()` (`GlowLightService.java:453`) branches on a mode persisted in the service's
+own shared prefs — `/data/data/com.nook.partner/shared_prefs/ctm_preference.xml`, key
+`ctm_mode`:
+
+| Mode | Value | `setupCTM()` behaviour |
+|------|-------|------------------------|
+| `CTM_MODE_DISABLE` | `-1` | force `COLD_LIGHT` — **`0` on Emperor** |
+| `CTM_MODE_MANUAL` | `0` | re-apply `manual_color_temperature` from prefs |
+| `CTM_MODE_AUTO` | `1` | sunrise/sunset from location |
+| `CTM_MODE_SCHEDULE` | `2` | sunrise/sunset from user-set times |
+
+```java
+// GlowLightService.java:453
+private void setupCTM() {
+    initIfNeed();
+    android.util.Log.i(TAG, "setupCTM:" + getCTMMode(this));
+    if (getCTMMode(this) == -1) {
+        setFrontLightBrightnessColor(GlowLightUtils.COLD_LIGHT, false);
+        return;
+    }
+    ...
+```
+
+Two details make mode `-1` a trap rather than a preference:
+
+- **`getCTMMode()` defaults to `-1`** when the key is absent (`GlowLightService.java:682`),
+  so a *missing* pref is indistinguishable from a deliberate "CTM off".
+- **In mode `-1`, `action_set_color_temperature` does not persist.** `saveColorTemperature(i, true)`
+  delegates to `getMode().saveColorTemperatureByTime(i)`; with no mode set, `getMode()` returns
+  a `ScheduleMode`, whose `saveColorTemperatureByTime()` returns early when sunrise/sunset are
+  `null` (`CTMMode.java:88`). The value reaches the hardware and is lost at the next unlock.
+
+In mode `0` the same intent routes to `ManualMode.saveColorTemperatureByTime()`, which writes
+`manual_color_temperature` — so KOReader's warmth slider and CTM's stored value stay in sync,
+and the value survives unlock.
+
+`COLD_LIGHT`, `DAY_LIGHT` and `TUGSTEN_LIGHT` are **inverted on this device**
+(`GlowLightUtils.java:38-40`) — on Emperor, cold is `0` and warm is `87`:
+
+```java
+COLD_LIGHT   = EpdUtils.isDeviceEmperor() ? 0  : 100;
+DAY_LIGHT    = EpdUtils.isDeviceEmperor() ? 12 : 88;
+TUGSTEN_LIGHT= EpdUtils.isDeviceEmperor() ? 87 : 13;
+```
+
+Note that `ManualMode`'s fallback is `DAY_LIGHT` = `12` on the 0–100 scale = **1 of 10** on
+the hardware. Setting mode `0` without seeding `manual_color_temperature` therefore still
+looks almost cold — the mode and the value must both be set.
+
+### Recovering after an unclean shutdown
+
+`ctm_mode` lives *only* in `ctm_preference.xml`. **Nothing re-establishes it at boot** —
+`ACTION_ENABLE_CTM` is sent only by B&N's own glowlight UI (`GlowLightUtils.java:146`), and
+no `BOOT_COMPLETED` receiver in `nookPartner` touches CTM. A thermal shutdown, a battery
+pull, or any hard power cut can lose that file's contents (SharedPreferences commit not yet
+flushed to disk), and the device then forces cold light after every unlock, permanently.
+
+**Symptom:** warmth resets to cold on every unlock; logcat shows
+
+```
+I/CTMService( <pid> ): setupCTM:-1
+V/LightsService( 1896 ): Jungwen-LightService- kk-1-brightness(color):0
+E/lights  ( 1718 ): backlight-color: set_light, max_color=10, target brightness=0
+```
+
+**Diagnose** — one call, no root:
+
+```bash
+# turn the screen off and on, then:
+adb shell settings get system screen_brightness_color   # 0 after an unlock you didn't ask for
+```
+
+Or read the mode directly (root):
+
+```bash
+adb shell su -c 'cat /data/data/com.nook.partner/shared_prefs/ctm_preference.xml'
+```
+
+A file containing *only* `<int name="color_temperature" value="0" />` is the fingerprint:
+that is exactly what the mode `-1` path writes when it recreates the file from scratch
+(`setFrontLightBrightnessColor(COLD_LIGHT, false)` → `saveColorTemperature(0, false)`, which
+skips the manual-value write).
+
+**Repair** — no root, order matters, idempotent:
+
+```bash
+# 1. CTM -> MANUAL, so setupCTM() re-applies a stored value instead of forcing cold
+adb shell am startservice -n com.nook.partner/.service.GlowLightService \
+  -a action_set_ctm_mode --ei extra_ctm_mode 0
+
+# 2. seed that stored value (0-100 scale; 100 = warmth 10, 0 = cold)
+adb shell am startservice -n com.nook.partner/.service.GlowLightService \
+  -a action_set_color_temperature --ei extra_color_temperature 100
+```
+
+Step 1 alone leaves warmth at `DAY_LIGHT`/10 = 1. `GlowLightService` is an `IntentService`,
+so the two intents are handled in the order sent.
+
+Verify by cycling the screen — `screen_brightness_color` must hold its value:
+
+```
+setupCTM:0
+Jungwen-LightService- kk-1-brightness(color):10
+```
+
+**On-device equivalent, no ADB:** open B&N's own glowlight settings and move the warmth
+slider once. That path calls `GlowLightUtils.setCTMMode()` and rewrites the same prefs.
+
+**In KOReader:** `NookGL4plusController.assertManualCtmMode()` sends intent 1 once per
+process, immediately before the first warmth write (which supplies intent 2) — so simply
+launching a build that includes it repairs the device.
 
 ---
 
@@ -257,6 +379,13 @@ adb logcat -d | grep -i "securityexception"
    for the re-enable / selective re-disable procedure
 3. After resume, check KOReader's warmth restore logic fires — look for `setScreenWarmth`
    in logcat
+
+### Warmth resets to cold on every unlock
+
+CTM is in mode `-1` and forcing `COLD_LIGHT`. Usually the aftermath of an unclean shutdown.
+Confirm with `adb logcat | grep setupCTM` — a `setupCTM:-1` immediately followed by
+`kk-1-brightness(color):0` is definitive. See
+[Recovering after an unclean shutdown](#recovering-after-an-unclean-shutdown).
 
 ### Warmth not restored after reboot
 

@@ -22,7 +22,9 @@ Device identifiers:
 | [temperature-management.md](temperature-management.md) | Temperature warning dialogs and thermal shutdown — what triggers them and how to suppress them |
 | [power-management.md](power-management.md) | Deep sleep via `power_enhance_enable`, `PowerManagerEx`, nopowen patch, slide-to-unlock |
 | [ota-updates.md](ota-updates.md) | OTA firmware update mechanism, server URLs, and how to permanently block all update paths |
-| [eink-and-frontlight.md](eink-and-frontlight.md) | E-ink refresh via `View.invalidate(int)` hook; brightness via `Settings.System`; warmth via `GlowLightService` |
+| [eink.md](eink.md) | E-ink refresh via the `View.invalidate(int)` hook |
+| [frontlight.md](frontlight.md) | Brightness via `Settings.System`; warmth via `GlowLightService`; CTM and recovery from unclean shutdowns |
+| [FINDINGS.md](FINDINGS.md) | Settled-question ledger — grep this before investigating anything |
 | [hwc-hal-reverse-engineering.md](hwc-hal-reverse-engineering.md) | Full RE of `hwcomposer.virgo.so`, `libgui.so`, `libsurfaceflinger.so`, and framework VDEX — call chain from `SurfaceControl.setRefreshMode` down to `layer->refreshMode` at HWC struct offset 0x24 |
 | [handoff-surfacecontrol-path.md](handoff-surfacecontrol-path.md) | Test procedure and decision tree for the new no-root SurfaceControl waveform path (GLR16 capable) |
 
@@ -96,7 +98,13 @@ Kernel and framework behaviour was verified live over ADB with root access (Magi
   is set via `Settings.System.SCREEN_BRIGHTNESS` (0–100 scale); **warmth** is set by
   sending an intent to `com.nook.partner/.service.GlowLightService`, which holds
   `DEVICE_POWER` and drives the LM3630A chip — no root required.
-  See [eink-and-frontlight.md](eink-and-frontlight.md).
+  See [eink.md](eink.md) and [frontlight.md](frontlight.md).
+
+- **Warmth resets to cold on every unlock** after an unclean shutdown. `GlowLightService`'s
+  CTM layer re-applies a warmth value on every `SCREEN_ON`, and its mode — held only in
+  `ctm_preference.xml`, restored by nothing at boot — defaults to `-1` (`COLD_LIGHT` = 0 on
+  Emperor) once that pref is lost. Repaired with two intents, no root.
+  See [frontlight.md](frontlight.md#recovering-after-an-unclean-shutdown).
 
 - **Unprivileged waveform control** is available via `android.view.SurfaceControl.setRefreshMode(int)`,
   a B&N-added `@hide` method that routes through SurfaceFlinger → `hwcomposer.virgo.so`
