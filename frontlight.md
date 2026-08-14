@@ -276,8 +276,13 @@ The only UI that *would* repair the mode is `NightModeSettingsFragment` — but 
 reachable only from B&N's own status bar. **Untested.**
 
 **In KOReader:** `NookGL4plusController.assertManualCtmMode()` sends intent 1 once per
-process, immediately before the first warmth write (which supplies intent 2) — so simply
-launching a build that includes it repairs the device.
+process, immediately before the first warmth write (which supplies intent 2). Note the
+precondition: the repair fires on the first `setWarmthHW()` call, **not at launch**.
+`BasePowerD:new()` only *reads* hardware warmth at init (`o.fl_warmth = o:frontlightWarmthHW()`),
+and `hasStandaloneWarmth()` is `false` here, so `turnOnFrontlightHW()` does not write warmth
+either. In practice KOReader does write warmth on resume — logcat shows
+`V/Lights: Setting warmth to 10 of 10` after each resume — but that is an observation, not a
+guarantee from the code path. **Unverified against a build; see the end-to-end test.**
 
 ---
 
