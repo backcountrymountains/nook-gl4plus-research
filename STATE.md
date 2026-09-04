@@ -239,6 +239,38 @@ Working. `ctm_mode=0`, warmth holding across screen cycles. Installed KOReader i
   **#3** deep-sleep wake is only partially covered: the device does suspend hard
   (`PowerManagerEx`) and warmth held across those cycles, but `power_enhance_enable`
   reads `null` on this build, so the named knob was never exercised.
+- 17:20 **Upstream is empty — nobody else is working on this.** `gh` search (validated
+  against a known-good control that does return 14574, so the empty results are real):
+  no issue or PR anywhere in the `koreader` org mentions `ctm_mode`, `GlowLightService`,
+  or a CTM warmth reset. None of the 10 open `android-luajit-launcher` PRs touch Nook.
+  `NookGL4plusController.kt` has exactly ONE upstream commit ever — `d1be9af` (#592,
+  2026-06-19), authored by us — and `origin/master`'s copy is byte-identical to our
+  fix's base, so it is untouched since. `origin/master` is **18** ahead of `a22c7a7`
+  (cursor said 10).
+- 17:20 **Issue 14574 is OUR OWN FR**, "FR: Add Brightness and Warmth Light control for
+  Nook Glowlight 4 plus BNRV-1300", opened 2025-11-05, CLOSED, label `enhancement`. The
+  `see .../issues/14574` line in the controller predates our fix and points at the
+  device-support request, NOT at a report of the warmth reset. **No upstream issue
+  documents this bug** — one needs filing before or with the PR.
+- 17:22 Precedent found: **koreader#5465** (2019, Kobo A1) "After a koreader restart the
+  frontlight warmth resets to 0 ... I just have to adjust it twice to get it back."
+  NiLuJe's fix coupled warmth into `KoboPowerD:setIntensityHW` for devices with natural
+  light but no mixer. Same shape as ours; useful to cite in the PR.
+- 17:25 **`hasStandaloneWarmth() = false` in our controller looks like a misdeclaration —
+  possible one-line option (c).** `AndroidPowerD:turnOnFrontlightHW()`/`turnOffFrontlightHW()`
+  write warmth ONLY `if android.hasStandaloneWarmth()`, which is why nothing writes warmth
+  at startup. Our `setBrightness` writes `Settings.System.SCREEN_BRIGHTNESS` while
+  `setWarmth` sends an independent service intent — fully separate mechanisms. The two
+  controllers that DO return `true` (`OnyxWarmthController`, `OnyxPalma2ProController`)
+  qualify on exactly that criterion: separate sysfs files for brightness vs warmth.
+  Flipping the flag would make `turnOnFrontlightHW()` fire our assert paired with the
+  user's SAVED warmth — satisfying the pairing constraint AND removing the flash.
+  **UNVERIFIED, three named risks:** (1) `turnOnFrontlightHW` only runs on an off→on
+  frontlight transition, so it may not fire at every launch; (2) `turnOffFrontlightHW`
+  would then write `fl_warmth_min`=0, which under CTM manual mode PERSISTS 0 as
+  `manual_color_temperature` — a possible new regression; (3) scaling asymmetry —
+  `turnOnFrontlightHW` sends `fl_warmth / warm_diff` (0-10) while `setWarmthHW` sends
+  `warmth` raw, and the controller range-checks against `WARMTH_MAX`=10. Test before believing.
 - Device restored: warmth 10, `ctm_mode=0`, `color_temperature=100`,
   KOReader `frontlight_warmth=100`, `stay_on_while_plugged_in` back to 0, book returned
   to page 394/1089. One residue: `pre_ctm_mode=1` (was 0) from the AUTO test — inert.
