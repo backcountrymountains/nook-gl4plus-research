@@ -329,6 +329,24 @@ Working. `ctm_mode=0`, warmth holding across screen cycles. Installed KOReader i
   whether a warmth-only write emits it, and whether the extra carries the current mode.
   Design it enables: write saved warmth at init; assert manual and re-write ONLY if the
   broadcast reports -1 — never touching modes 0/1/2.
+- 17:45 **PROJECT ASSUMPTION, stated by the user and verified on-device: `bn.ereader` is
+  always DISABLED.** KOReader and the stock reader are mutually exclusive — `bn.ereader`
+  takes over the whole device — so every KOReader user has disabled it. Verified:
+  `pm list packages -d` returns exactly `bn.ereader` and `com.bn.nook.hub`, and
+  `com.nook.partner` is ENABLED. **Design to this assumption; do not engineer for a
+  bn.ereader-enabled device.**
+- 17:45 **Consequence — TEST #6 (AUTO/SCHEDULE clobber) IS RETIRED as a non-issue, and the
+  broadcast-receiver design is dropped.** CTM AUTO/SCHEDULE draw their schedule from
+  `bn.ereader/...DeviceLocationService`, which cannot exist in a supported configuration
+  (observed: `Unable to start service ... not found`), so modes 1 and 2 degrade to
+  "re-apply the stored `color_temperature`" — behaviourally identical to mode 0, which is
+  what we measured at 17:38. Nothing perceivable is lost by clobbering, and the mode UI
+  lived in the now-disabled stock app so the user cannot set 1/2 anyway. **Keep the simple
+  unconditional assert.** Do NOT add a `action_ctm_mode_CHANGE` receiver: it buys nothing
+  in the only supported configuration and adds an untested async dependency.
+  Correspondingly the `setupAutoModeGPB` power caveat is INERT by construction — one
+  sentence in the PR, not a disclosure. **The PR must state this assumption explicitly**,
+  since an upstream reviewer has no way to know it.
 - Device restored: warmth 10, `ctm_mode=0`, `color_temperature=100`,
   KOReader `frontlight_warmth=100`, `stay_on_while_plugged_in` back to 0, book returned
   to page 394/1089. One residue: `pre_ctm_mode=1` (was 0) from the AUTO test — inert.
