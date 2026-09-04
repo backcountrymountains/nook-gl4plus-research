@@ -310,6 +310,25 @@ Working. `ctm_mode=0`, warmth holding across screen cycles. Installed KOReader i
 - Test vehicle was REMOVED from the device (`/sdcard/koreader/patches/1-nook-ctm-warmth-restore.lua`);
   only the pre-existing `2111-nook-gl4plus-deepsleep.lua` remains. Not offered as a
   permanent install — ask the user first.
+- 17:38 **Clobber-vs-restore, measured. Only mode -1 is broken; 1 and 2 are FINE.**
+  Set CTM to AUTO (1) + warmth 30 → survived screen cycle (`setupCTM:1` re-applied
+  `color_temperature=30` → `color:3`). Set SCHEDULE (2) + warmth 70 → likewise held
+  (`setupCTM:2` → `color:7`). So in modes 1/2 the service re-applies the STORED
+  `color_temperature`, which is exactly what our warmth intent writes — KOReader's warmth
+  control works fine without asserting manual. **The clobber buys nothing functionally;
+  it is only needed for -1.** (In 1/2 the write updates `color_temperature` but leaves
+  `manual_color_temperature` alone; in 0 it updates both.)
+- 17:38 **Power caveat re-scoped — the cursor's claim is right but applies to the REPAIR,
+  not the clobber.** `Unable to start service ... bn.ereader/...DeviceLocationService`
+  fires on every SCREEN_ON in modes 0, 1 AND 2 alike (measured: 2 attempts across 2 cycles
+  in mode 0). Only -1 short-circuits. So `-1→0` adds a per-wake location attempt (inert
+  here, real on a device with `bn.ereader` enabled); `1→0` / `2→0` change nothing.
+- 17:39 **"Assert only when broken" IS implementable.** `dumpsys activity broadcasts`
+  shows `action_ctm_mode_CHANGE` really is broadcast, `flg=0x10 (has extras)`, and it is
+  NOT in `protected-broadcasts` — so KOReader may register a receiver. Untested link:
+  whether a warmth-only write emits it, and whether the extra carries the current mode.
+  Design it enables: write saved warmth at init; assert manual and re-write ONLY if the
+  broadcast reports -1 — never touching modes 0/1/2.
 - Device restored: warmth 10, `ctm_mode=0`, `color_temperature=100`,
   KOReader `frontlight_warmth=100`, `stay_on_while_plugged_in` back to 0, book returned
   to page 394/1089. One residue: `pre_ctm_mode=1` (was 0) from the AUTO test — inert.
