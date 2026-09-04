@@ -189,3 +189,56 @@ Working. `ctm_mode=0`, warmth holding across screen cycles. Installed KOReader i
 **1278441**. Warmth slider was left at **2 of 10** by the last test, not 10.
 `stay_on_while_plugged_in` was set during testing and **reverted to 0**.
 `screen_brightness_color_backup` was set to 6 during testing and **reverted to 0**.
+
+---
+
+## Log — 2026-09-04
+
+- 16:42 Cursor claim "warmth slider left at 2 of 10" was WRONG at session start —
+  device read `screen_brightness_color=10`, `ctm_mode=0`, `color_temperature=100`.
+- 16:46 Instrument validated on a known-good device: synthetic `input swipe` on the
+  warmth slider produces `V/Lights: Setting warmth to N of 10` (10→5). No assert line,
+  because the long-running KOReader process had already consumed the once-per-process latch.
+- 16:47 Broken state via `kill -9`: service recreates `ctm_preference.xml` containing
+  ONLY `color_temperature=0` — **no `ctm_mode` key**. Cleaner receipt than "file missing":
+  it is the absent key, not the absent file, that yields `getCTMMode() → -1`.
+- 16:48 Re-confirmed the falsified claim on a fresh process: launch + resume + unlock
+  emitted **zero** `V/Lights` lines. Wake logged `CTMService: setupCTM:-1` →
+  `brightness(color):0`.
+- 16:53 **TEST 1 PASSES — the missing receipt.** Fresh KOReader (pid 19032) on a broken
+  device, warmth slider dragged 0→5:
+  `Setting warmth to 1 of 10` (.143) → `CTM mode set to manual` (.149) →
+  `CTMService: setupCTM:0` (.183) → `backlight-color: target brightness=1` (.199).
+  `ctm_mode=0` restored in the XML. Assert fired exactly ONCE — slider steps 2,3,4,5
+  logged no assert line, so the once-per-process latch behaves as designed.
+- 16:54 Repair survives a screen cycle: warmth held at 5, `setupCTM:0` on wake.
+- 16:57 **TEST 2a** — repair is durable across a clean reboot (warmth 5, `ctm_mode=0`).
+- 16:58 **TEST 2b — a real reboot reproduces the bug identically to `kill -9`.** With the
+  file deleted then rebooted: warmth still read 5 immediately after boot, and only the
+  FIRST screen cycle broke it — `setupCTM:-1` → `brightness(color):0`, 5→0. The reset
+  lands on first SCREEN_ON, not at boot, which is exactly "resets on every unlock".
+- 17:00 **TEST 6 — AUTO mode IS silently clobbered.** CTM set to mode 1, fresh KOReader,
+  slider moved: `ctm_mode` 1→0. B&N's service recorded `pre_ctm_mode=1`, so the prior
+  mode is recoverable if the PR chooses to restore it rather than clobber.
+- 17:00 **TEST 4 — the warm flash is real, and measured.** Stored 10, user asked 9:
+  request at .335, assert .340, `setupCTM:0` .378, hardware driven to the STORED **10**
+  at .392, correct value 9 only at .428. Wrong value on screen ~36 ms, ~57 ms after the
+  request. Stored 100 + target 0 would be a full-warm flash on every first warmth change.
+- Navigation recipe (expensive to derive, needed for every UI test):
+  `activate_menu = "swipe"` — taps and KEYCODE_MENU all page FORWARD. Menu opens by
+  swiping down from the top edge. Frontlight = Settings **gear** tab (435,60), first
+  item (210,182), in BOTH reader and file manager. Warmth slider y=961, track x 185→1220.
+  KOReader's own sleep screen unlock arrow is at **y≈1772** (not 1800 — the text is at
+  1800 and swiping there does nothing); drag (420,1772)→(1080,1772).
+  While that sleep screen is up KOReader re-suspends the device within ~20 s and
+  `stay_on_while_plugged_in`/`svc power stayon` do NOT hold it (custom `PowerManagerEx`);
+  after a successful unlock the normal 5-min timeout applies. `logcat -c` fails on this
+  device ("failed to clear the 'main' log") — use `-t N` / `-T <ts>` windows instead.
+- NOT tested this session: **#5** (`com.nook.partner` disabled → `startService` null) —
+  skipped deliberately, it needs disabling the package the ledger says must stay ENABLED.
+  **#3** deep-sleep wake is only partially covered: the device does suspend hard
+  (`PowerManagerEx`) and warmth held across those cycles, but `power_enhance_enable`
+  reads `null` on this build, so the named knob was never exercised.
+- Device restored: warmth 10, `ctm_mode=0`, `color_temperature=100`,
+  KOReader `frontlight_warmth=100`, `stay_on_while_plugged_in` back to 0, book returned
+  to page 394/1089. One residue: `pre_ctm_mode=1` (was 0) from the AUTO test — inert.
