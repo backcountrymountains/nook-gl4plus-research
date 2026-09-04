@@ -271,6 +271,45 @@ Working. `ctm_mode=0`, warmth holding across screen cycles. Installed KOReader i
   `manual_color_temperature` — a possible new regression; (3) scaling asymmetry —
   `turnOnFrontlightHW` sends `fl_warmth / warm_diff` (0-10) while `setWarmthHW` sends
   `warmth` raw, and the controller range-checks against `WARMTH_MAX`=10. Test before believing.
+- 17:26 **Option (c) — flipping `hasStandaloneWarmth()` — is DEAD. Falsified by reading,
+  no build needed.** The flag is consulted ONLY in `turnOnFrontlightHW`/`turnOffFrontlightHW`;
+  `turnOnFrontlight` early-returns when the light is already on; `AndroidPowerD` does NOT
+  override `beforeSuspend`/`afterResume` (unlike Kobo/Kindle) and the base versions never
+  touch the frontlight, so there is no off→on transition across suspend/resume; and
+  `BasePowerD:new` calls only `_decideFrontlightState()`, which just reads `isFrontlightOnHW()`.
+  Flipping it would fire only on a MANUAL frontlight toggle. Risk (1) was fatal; risk (3),
+  the scaling asymmetry, was a false alarm (`warmth_scale`/`toNativeWarmth` handle it).
+- 17:23 **Option (a) WORKS — self-heal proven on hardware, no rebuild.** KOReader's Lua
+  lives at `/data/data/org.koreader.launcher/files/` AND userpatches run from
+  `/sdcard/koreader/patches/` (`^<priority>%d*%-` name match; `early`="1" runs at
+  reader.lua:27, before `Device` at :157; `G_reader_settings` exists by :39). Device Lua
+  verified byte-identical to checkout `4bd308b3a` = installed versionName. A `1-*.lua`
+  userpatch wrapping `AndroidPowerD:init` to push the saved warmth:
+  broken device (warmth 0) → launch KOReader → **warmth restored to 10 with NO slider
+  touch**, `Setting warmth to 10 of 10` → `CTM mode set to manual` → `setupCTM:0`, and it
+  survived a screen cycle with `ctm_mode=0`, `color_temperature=100` persisted.
+- 17:25 **Trap that any option-(a) implementation MUST handle — upstream bug.**
+  `BasePowerD:new` line 38 does `self.warmth_scale = 100 / o.fl_warmth_max`, writing to the
+  CLASS table, not the instance `o`. `generic/device.lua:240` first builds a *generic* powerd
+  whose `fl_warmth_max` is the default 100, so `BasePowerD.warmth_scale` becomes **1**;
+  `AndroidPowerD:init` then inherits that stale 1 through the metatable (measured:
+  `BEFORE orig_init ... fl_warmth_max=100 warmth_scale=1`, `AFTER ... fl_warmth_max=10
+  warmth_scale=1`). A guarded `if not self.warmth_scale` therefore silently keeps 1, so
+  `toNativeWarmth(100)`=100 and the controller rejects it — observed as
+  `W Lights: warmth value out of range: 100`, and warmth stayed 0. **Assign
+  `warmth_scale` UNCONDITIONALLY in init**, which is exactly what `KoboPowerD:init` does
+  (kobo/powerd.lua:160). My first attempt failed on precisely this; v2 fixed it.
+  My lazy-lights-init hypothesis for the same symptom was WRONG — `hasNL=true` both
+  before and after `orig_init`.
+- 17:22 Upstream precedent for (a): `KoboPowerD:init` already does
+  `if self:isFrontlightOnHW() then ... self:setWarmth(self.fl_warmth, true)`, sourcing the
+  value from `G_reader_settings:readSetting("frontlight_warmth")` via `_syncKoboLightOnStart`.
+  `AndroidPowerD:init()` has NO equivalent — it only computes ranges. That is the real gap,
+  and it is an ANDROID-GENERIC gap, not Nook-specific; it is invisible on devices whose
+  hardware retains warmth, and only bites here because CTM actively overwrites it.
+- Test vehicle was REMOVED from the device (`/sdcard/koreader/patches/1-nook-ctm-warmth-restore.lua`);
+  only the pre-existing `2111-nook-gl4plus-deepsleep.lua` remains. Not offered as a
+  permanent install — ask the user first.
 - Device restored: warmth 10, `ctm_mode=0`, `color_temperature=100`,
   KOReader `frontlight_warmth=100`, `stay_on_while_plugged_in` back to 0, book returned
   to page 394/1089. One residue: `pre_ctm_mode=1` (was 0) from the AUTO test — inert.
