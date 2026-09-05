@@ -140,10 +140,10 @@ pre-existing `2111-nook-gl4plus-deepsleep.lua`.
 
 ## Log
 
-- 08:2x Frenzie (MEMBER) reviewed BOTH PRs, same ask: comments too verbose. #620 issue
-  comment "make its added comments shorter and simpler"; #16004 inline
-  `discussion_r3939727712` on powerd.lua:50 "Probably just remove the comment."
-- 08:3x Trimmed and pushed. koreader `262e32910` (+19/-0 → **+9/-0**), launcher `2cfaffe`
+- 00:29 / 00:42 MDT Frenzie (MEMBER) reviewed BOTH PRs, same ask: comments too verbose.
+  #16004 inline `discussion_r3939727712` on powerd.lua:50 "Probably just remove the comment.";
+  #620 issue comment "make its added comments shorter and simpler".
+- 08:35 Trimmed and pushed. koreader `262e32910` (+19/-0 → **+9/-0**), launcher `2cfaffe`
   (+39/-1 → **+29/-1**). Added as new commits on top, NOT amended — both repos squash-merge
   (receipt: `git log origin/master` is all single-parent `... (#NNNN)` subjects), so no
   force-push was needed.
