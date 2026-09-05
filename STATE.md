@@ -347,6 +347,23 @@ Working. `ctm_mode=0`, warmth holding across screen cycles. Installed KOReader i
   Correspondingly the `setupAutoModeGPB` power caveat is INERT by construction — one
   sentence in the PR, not a disclosure. **The PR must state this assumption explicitly**,
   since an upstream reviewer has no way to know it.
+- 18:25 **BOTH PRs SUBMITTED.** launcher `koreader/android-luajit-launcher#620`
+  (1 file, +39/-1, branch `nook-gl4plus-ctm-warmth` off upstream `0bb27ff`; file content
+  byte-identical to the hardware-verified `81c797b`) and koreader
+  `koreader/koreader#16004` (1 file, +19/-0, branch `android-restore-warmth-at-startup`).
+  Cross-linked. `gh pr edit` is broken by a GitHub GraphQL Projects-classic deprecation —
+  use `gh api -X PATCH repos/<o>/<r>/pulls/<n> -f body=...` instead.
+- 18:19 Final Lua patch verified by writing the REAL file to
+  `/data/data/org.koreader.launcher/files/frontend/device/android/powerd.lua` (su, `.orig`
+  backup, restored after) — no APK rebuild needed. Broken device → launch → warmth 0→10,
+  no slider touch, no Lua error; held across a screen cycle. Both device Lua and the
+  koreader working tree restored to stock afterwards.
+- 18:19 Corrected a WRONG causal claim before it went public: the stale `warmth_scale=1`
+  does NOT come from a generic PowerD built in `Device:init`. It is set by the
+  module-level `local AndroidPowerD = BasePowerD:new{...}` at require time — `o` has no
+  `fl_warmth_max`, so it inherits the default 100 and `BasePowerD.warmth_scale` becomes 1.
+- 18:19 Cleared a stale `koreader/.git/index.lock` (0 bytes, dated 2026-08-13 17:32, no git
+  process running) — the leftover from the previous session's mid-commit hard stop.
 - Device restored: warmth 10, `ctm_mode=0`, `color_temperature=100`,
   KOReader `frontlight_warmth=100`, `stay_on_while_plugged_in` back to 0, book returned
   to page 394/1089. One residue: `pre_ctm_mode=1` (was 0) from the AUTO test — inert.
