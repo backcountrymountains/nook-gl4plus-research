@@ -49,7 +49,9 @@ LightsService: kk-1-brightness(color):10
 
 ## Exact next step
 
-Nothing is required until a reviewer responds. When one does:
+**A reviewer has responded — see `## Log` at the bottom.** The comment-verbosity round is
+answered and pushed; both PRs are back to awaiting review. The list below still governs
+whatever comes next:
 
 1. **If asked to change the Kotlin** (most likely: `@Volatile ctmModeAsserted` →
    `AtomicBoolean.compareAndSet`, which I raised myself in the PR notes) — that change is
@@ -135,3 +137,23 @@ Working and restored to how the session found it. Warmth **10**, `ctm_mode=0`,
 the device does not self-heal yet; it is simply in a repaired state. All test artifacts were
 removed: the device Lua is stock again and `/sdcard/koreader/patches/` holds only the
 pre-existing `2111-nook-gl4plus-deepsleep.lua`.
+
+## Log
+
+- 08:2x Frenzie (MEMBER) reviewed BOTH PRs, same ask: comments too verbose. #620 issue
+  comment "make its added comments shorter and simpler"; #16004 inline
+  `discussion_r3939727712` on powerd.lua:50 "Probably just remove the comment."
+- 08:3x Trimmed and pushed. koreader `262e32910` (+19/-0 → **+9/-0**), launcher `2cfaffe`
+  (+39/-1 → **+29/-1**). Added as new commits on top, NOT amended — both repos squash-merge
+  (receipt: `git log origin/master` is all single-parent `... (#NNNN)` subjects), so no
+  force-push was needed.
+- Changes are **comment-only** — verified no code line differs (`git diff -U0` filtered of
+  comment lines is empty in both). The hardware-verification chain from 2026-09-04 therefore
+  still holds and **no APK rebuild is needed**. No Lua interpreter on this box, but only
+  whole-line comments were deleted.
+- Kept one short comment in each: powerd.lua's `warmth_scale` line (it looks deletable
+  without it) and the launcher's IntentService-ordering note. The full diagnosis was already
+  in the commit messages and PR bodies, so the trim lost nothing.
+- Worktrees `/tmp/wt-ko` `/tmp/wt-lj` used and removed; `koreader` master tree left exactly
+  as found (submodule pointers still deliberately dirty, launcher on `nook-gl4plus-ctmfix`).
+- Not done: no reply posted to either reviewer thread, and neither thread resolved.
