@@ -15,8 +15,8 @@ of any competing work. There is no open question blocking the PRs.
 
 | | |
 |---|---|
-| `koreader/android-luajit-launcher#620` | Kotlin: assert `CTM_MODE_MANUAL` before the first warmth write. 1 file, +39/-1. |
-| `koreader/koreader#16004` | Lua: push saved warmth to hardware in `AndroidPowerD:init()`. 1 file, +19/-0. |
+| `koreader/android-luajit-launcher#620` | Kotlin: assert `CTM_MODE_MANUAL` before the first warmth write. 1 file, +29/-1. |
+| `koreader/koreader#16004` | Lua: push saved warmth to hardware in `AndroidPowerD:init()`. 1 file, +9/-0. |
 
 They are cross-linked and depend on each other: #620 makes a warmth write *persist*, #16004
 makes a warmth write *happen at startup*. Either alone is a partial fix.
@@ -27,9 +27,11 @@ Both cut fresh off upstream `origin/master`, pushed to `fork`
 (`backcountrymountains`). Local branches still exist; the worktrees used to build them were
 removed.
 
-- launcher — `nook-gl4plus-ctm-warmth`, commit **`e152101`**, based on upstream `0bb27ff`.
-  File content is **byte-identical** to `81c797b`, the version verified on hardware.
-- koreader — `android-restore-warmth-at-startup`, commit **`73edee335`**.
+- launcher — `nook-gl4plus-ctm-warmth`, head **`2cfaffe`** (fix `e152101` + comment trim),
+  based on upstream `0bb27ff`. Code is **byte-identical** to `81c797b`, the version verified
+  on hardware — the trim touched comments only.
+- koreader — `android-restore-warmth-at-startup`, head **`262e32910`** (fix `73edee335` +
+  comment trim).
 
 ## How the fix was verified (2026-09-04, on device)
 
